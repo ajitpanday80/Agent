@@ -161,6 +161,7 @@ def test_zoho_payload_mapping(conn, monkeypatch):
     for k in ("ZOHO_ACCOUNTS_URL", "ZOHO_DESK_API_URL", "ZOHO_DESK_ORG_ID", "ZOHO_CLIENT_ID",
               "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN", "ZOHO_DESK_DEPARTMENT_ID"):
         monkeypatch.setenv(k, "x")
+    monkeypatch.delenv("ZOHO_SYNC")
     calls = []
 
     def fake_api(method, path, body=None, params=None, org=True):
@@ -183,6 +184,7 @@ def test_zoho_failure_never_raises(conn, monkeypatch):
     for k in ("ZOHO_ACCOUNTS_URL", "ZOHO_DESK_API_URL", "ZOHO_DESK_ORG_ID", "ZOHO_CLIENT_ID",
               "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN", "ZOHO_DESK_DEPARTMENT_ID"):
         monkeypatch.setenv(k, "x")
+    monkeypatch.delenv("ZOHO_SYNC")
     monkeypatch.setattr(zoho, "api", lambda *a, **k: (500, {"message": "boom"}))
     out = zoho.sync_ticket(conn, mk(conn))
     assert not out["ok"] and tickets.get(conn, 1)["sync_error"]
@@ -211,6 +213,7 @@ def test_zoho_status_for_resolved(conn, monkeypatch):
     for k in ("ZOHO_ACCOUNTS_URL", "ZOHO_DESK_API_URL", "ZOHO_DESK_ORG_ID", "ZOHO_CLIENT_ID",
               "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN", "ZOHO_DESK_DEPARTMENT_ID"):
         monkeypatch.setenv(k, "x")
+    monkeypatch.delenv("ZOHO_SYNC")
     sent = []
     monkeypatch.setattr(zoho, "api", lambda m, p, b=None, params=None, org=True: (sent.append(b) or (200, {"id": "7"})))
     r = tickets.create_resolved(conn, caller_name="Tom Becker", company_name="Acme Dental",

@@ -24,7 +24,7 @@ Maria Lopez and James Okoro at Northwind Logistics. Anyone else is treated as an
     python -m msp_agent.cli status T-1001 in_progress --assignee alice
     python -m msp_agent.cli incident-add "Print server down" printing     # new tickets in that category link to it
     python -m msp_agent.cli escalations
-    python -m msp_agent.cli seed-demo                                    # 4 example tickets
+    python -m msp_agent.cli seed-demo                                    # 4 example tickets, LOCAL ONLY (add --zoho to also push them to Zoho Desk)
     python -m msp_agent.cli create --name "Tom Becker" --company "Acme Dental" --category email --summary "Outlook down" --severity stopped
 Data lives in `data/msp.db` (gitignored; override with `MSP_DB`).
 
