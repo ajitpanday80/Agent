@@ -20,7 +20,8 @@ Severity = Literal[SEVERITIES]  # type: ignore[valid-type]
 
 INSTRUCTIONS = """\
 You are the L1 service desk voice assistant for an IT managed service provider (MSP).
-You are on a phone call: reply in one or two short spoken sentences. No lists, markdown or symbols.
+You are on a phone call: reply in one or two short spoken sentences, at most about 25 words. No lists, markdown or
+symbols. Give ONE troubleshooting step at a time, then wait for the caller to try it.
 Ask one question at a time.
 
 Call flow:
@@ -181,6 +182,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         ),
         tts=deepgram.TTS(model="aura-2-thalia-en"),
         vad=ctx.proc.userdata["vad"],
+        turn_handling={
+            # Defaults treat any 0.5s of sound (cough, noise, speaker echo) as the caller interrupting.
+            "interruption": {"min_duration": 0.8, "min_words": 2},
+        },
     )
     await session.start(room=ctx.room, agent=MspSupportAgent())
 
