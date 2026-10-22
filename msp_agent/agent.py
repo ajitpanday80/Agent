@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import Literal
@@ -7,7 +8,7 @@ from livekit import agents
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.plugins import deepgram, openai, silero
 
-from . import db, kb, tickets
+from . import db, kb, tickets, zoho
 from .escalation import CATEGORIES, SCOPES, SEVERITIES
 
 load_dotenv()
@@ -112,7 +113,8 @@ class MspSupportAgent(Agent):
         """Create a ticket. scope: single_user, several_users or whole_company. severity: stopped (cannot work),
         degraded (can work with difficulty) or minor. The system sets priority and returns what to tell the caller."""
         conn = db.connect()
-        r = tickets.create(
+        r = await asyncio.to_thread(
+            tickets.create,
             conn, caller_name=caller_name, company_name=company, callback_number=callback_number,
             category=category, summary=summary, details=details, scope=scope, severity=severity,
             workaround_available=workaround_available, security_concern=security_concern, data_loss=data_loss,
@@ -120,6 +122,10 @@ class MspSupportAgent(Agent):
         )
         t, d = r["ticket"], r["decision"]
         logger.info("ticket %s P%s action=%s", t["ref"], t["priority"], t["action"])
+        # Push to Zoho Desk off the event loop so the call audio is not blocked. Failures are logged, not spoken.
+        sync = await asyncio.to_thread(zoho.sync_ticket, conn, r)
+        if not sync.get("ok") and not sync.get("skipped"):
+            logger.error("Zoho sync failed, ticket %s kept locally: %s", t["ref"], sync.get("error"))
         parts = [
             f"{'Created' if r['is_new'] else 'Updated existing'} ticket {t['ref']}, priority P{t['priority']}.",
             d.say_to_caller(),

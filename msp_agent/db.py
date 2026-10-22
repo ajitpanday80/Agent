@@ -57,9 +57,19 @@ def connect(path: str | os.PathLike | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     if not conn.execute("SELECT 1 FROM companies LIMIT 1").fetchone():
         _seed(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the first release (SQLite has no IF NOT EXISTS for columns)."""
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(tickets)")}
+    for col in ("zoho_id", "zoho_number", "zoho_url", "sync_error"):
+        if col not in have:
+            conn.execute(f"ALTER TABLE tickets ADD COLUMN {col} TEXT")
+    conn.commit()
 
 
 def _seed(conn: sqlite3.Connection) -> None:

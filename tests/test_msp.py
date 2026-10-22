@@ -154,3 +154,35 @@ def test_cli_seed_demo(tmp_path, monkeypatch):
     for kw in cli.DEMO:
         cli._create(c, **kw)
     assert len(tickets.list_tickets(c)) == 4
+
+
+def test_zoho_payload_mapping(conn, monkeypatch):
+    from msp_agent import zoho
+    for k in ("ZOHO_ACCOUNTS_URL", "ZOHO_DESK_API_URL", "ZOHO_DESK_ORG_ID", "ZOHO_CLIENT_ID",
+              "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN", "ZOHO_DESK_DEPARTMENT_ID"):
+        monkeypatch.setenv(k, "x")
+    calls = []
+
+    def fake_api(method, path, body=None, params=None, org=True):
+        calls.append((method, path, body))
+        return 200, {"id": "999", "ticketNumber": "42", "webUrl": "http://z/42"}
+
+    monkeypatch.setattr(zoho, "api", fake_api)
+    r = mk(conn, category="email", severity="stopped", scope="whole_company")  # P1
+    out = zoho.sync_ticket(conn, r)
+    body = calls[0][2]
+    assert out["ok"] and body["priority"] == "High" and body["subject"].startswith("[P1]")
+    assert body["channel"] == "Phone" and body["contact"]["lastName"] == "Becker"
+    assert tickets.get(conn, 1)["zoho_id"] == "999"
+    r2 = mk(conn, category="email", severity="stopped", scope="whole_company")  # repeat -> comment, no new ticket
+    assert zoho.sync_ticket(conn, r2)["updated"] and calls[1][1] == "/tickets/999/comments"
+
+
+def test_zoho_failure_never_raises(conn, monkeypatch):
+    from msp_agent import zoho
+    for k in ("ZOHO_ACCOUNTS_URL", "ZOHO_DESK_API_URL", "ZOHO_DESK_ORG_ID", "ZOHO_CLIENT_ID",
+              "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN", "ZOHO_DESK_DEPARTMENT_ID"):
+        monkeypatch.setenv(k, "x")
+    monkeypatch.setattr(zoho, "api", lambda *a, **k: (500, {"message": "boom"}))
+    out = zoho.sync_ticket(conn, mk(conn))
+    assert not out["ok"] and tickets.get(conn, 1)["sync_error"]

@@ -106,10 +106,12 @@ def create(
         prior_contacts=prior, now=now,
     )
     incident = next(iter(active_incidents(conn, category)), None)
+    previous_priority = None
 
     if dup:
         # Same person, same category, still open: this is a repeat call, not a new ticket.
         priority = min(dup["priority"], d.priority)
+        previous_priority = dup["priority"]
         conn.execute(
             "UPDATE tickets SET contact_count=contact_count+1, priority=?, action=?, updated_at=? WHERE id=?",
             (priority, d.action, _iso(now), dup["id"]),
@@ -135,6 +137,7 @@ def create(
                      (tid, d.action, "; ".join(d.reasons), _iso(now)))
     conn.commit()
     return {"ticket": get(conn, tid), "decision": d, "is_new": is_new, "caller": caller,
+            "previous_priority": previous_priority,
             "incident": dict(incident) if incident else None}
 
 

@@ -28,6 +28,14 @@ Maria Lopez and James Okoro at Northwind Logistics. Anyone else is treated as an
     python -m msp_agent.cli create --name "Tom Becker" --company "Acme Dental" --category email --summary "Outlook down" --severity stopped
 Data lives in `data/msp.db` (gitignored; override with `MSP_DB`).
 
+## Zoho Desk sync (optional)
+Fill the `ZOHO_*` lines in `.env` (see `.env.example`). When all are set, every ticket the agent or the CLI creates
+is also pushed to Zoho Desk: subject `[P#] summary`, priority P1/P2=High, P3=Medium, P4=Low, channel Phone, and the
+priority reasoning in the description. A repeat call adds a private comment to the same Zoho ticket instead of
+creating a duplicate. Sync is one-way and failures never interrupt a call (they are logged and stored in the
+ticket's `sync_error`). Check the connection (read-only): `python scripts/zoho_check.py`.
+Region matters: use your data center's domains (`.in`, `.eu`, `.com`). Tokens come from a Zoho API Console Self Client.
+
 ## How it decides (important)
 The LLM only reports **facts** (category, scope, severity, security/human/hostile flags). `escalation.py` decides
 priority and action, so behavior is testable and not left to the model.

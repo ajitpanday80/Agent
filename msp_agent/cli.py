@@ -1,7 +1,11 @@
 """Tiny admin view of the mock PSA.  python -m msp_agent.cli --help"""
 import argparse
 
-from . import db, escalation, tickets
+from dotenv import load_dotenv
+
+from . import db, escalation, tickets, zoho
+
+load_dotenv()
 
 
 DEMO = [
@@ -24,6 +28,11 @@ def _create(conn, *, name, company, phone="+10000000000", category, summary, det
     t, d = r["ticket"], r["decision"]
     print(f"{'created' if r['is_new'] else 'updated'} {t['ref']}  P{t['priority']}  action={d.action}")
     print("  why:", "; ".join(d.reasons))
+    sync = zoho.sync_ticket(conn, r)
+    if sync.get("ok"):
+        print(f"  zoho: {sync.get('number') or sync['zoho_id']}  {sync.get('url') or ''}")
+    elif not sync.get("skipped"):
+        print("  zoho sync FAILED:", sync.get("error"))
 
 
 def main() -> None:
