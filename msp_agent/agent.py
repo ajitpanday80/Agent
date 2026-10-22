@@ -13,6 +13,7 @@ from .escalation import CATEGORIES, SCOPES, SEVERITIES
 
 load_dotenv()
 logger = logging.getLogger("msp-agent")
+logger.setLevel(logging.INFO)
 
 Category = Literal[CATEGORIES]  # type: ignore[valid-type]
 Scope = Literal[SCOPES]  # type: ignore[valid-type]
@@ -187,6 +188,21 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "interruption": {"min_duration": 0.8, "min_words": 2},
         },
     )
+
+    # Diagnostics: shows in the terminal what the agent hears and when it starts/stops speaking.
+    @session.on("user_input_transcribed")
+    def _heard(ev) -> None:
+        if ev.is_final:
+            logger.info("HEARD: %r", ev.transcript)
+
+    @session.on("agent_state_changed")
+    def _state(ev) -> None:
+        logger.info("agent %s -> %s", ev.old_state, ev.new_state)
+
+    @session.on("error")
+    def _error(ev) -> None:
+        logger.error("session error: %s", ev.error)
+
     await session.start(room=ctx.room, agent=MspSupportAgent())
 
 
