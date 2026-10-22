@@ -63,7 +63,8 @@ class MspSupportAgent(Agent):
 
     async def on_enter(self) -> None:
         await self.session.generate_reply(
-            instructions="Greet the caller, say you are an AI service desk assistant, and ask for their name and company."
+            instructions="Greet the caller, say you are an AI service desk assistant, and ask for their name and company.",
+            allow_interruptions=False,  # noise or echo must not cut the greeting off
         )
 
     @function_tool
