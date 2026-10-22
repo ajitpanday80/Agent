@@ -3,7 +3,7 @@ id: mac-slow-or-frozen
 title: Mac running slowly or an app frozen (Mac)
 category: performance
 os: mac
-keywords: slow, laggy, lag, sluggish, performance, freezing, frozen, not responding, spinning wheel, beachball, app frozen, mac slow, hangs
+keywords: slow, laggy, lag, sluggish, performance, freezing, frozen, spinning wheel, beachball, app frozen, mac slow, hangs
 sources:
   - https://support.apple.com/guide/mac-help/if-your-mac-runs-slowly-mchlp1731/mac
   - https://support.apple.com/en-us/102586

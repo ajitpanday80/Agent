@@ -66,8 +66,20 @@ def load() -> list[dict]:
 ARTICLES = load()
 
 
+def _stem(w: str) -> str:
+    """Very light stemmer so 'receiving'/'receive', 'deleted'/'delete', 'prints'/'print' match."""
+    for suf in ("ing", "ed", "es", "s", "e"):
+        if w.endswith(suf) and len(w) - len(suf) >= 4:
+            return w[: -len(suf)]
+    return w
+
+
 def _tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9']+", text.lower()))
+
+
+def _stems(text: str) -> set[str]:
+    return {_stem(t) for t in _tokens(text)}
 
 
 def search(query: str, limit: int = 2, operating_system: str | None = None) -> list[dict]:
@@ -75,6 +87,7 @@ def search(query: str, limit: int = 2, operating_system: str | None = None) -> l
     operating_system 'windows' or 'mac' keeps only matching and OS-neutral articles."""
     q = query.lower()
     qt = _tokens(q)
+    qs = _stems(q)
     require_reviewed = os.getenv("KB_REQUIRE_REVIEWED", "false").lower() == "true"
     scored = []
     for a in ARTICLES:
@@ -86,7 +99,7 @@ def search(query: str, limit: int = 2, operating_system: str | None = None) -> l
         for k in a["keywords"]:
             if " " in k or "'" in k or "-" in k:
                 score += 3 if k in q else 0
-            elif k in qt:
+            elif k in qt or _stem(k) in qs:
                 score += 2
         if score:
             score += len(qt & _tokens(a["title"]) - STOPWORDS)

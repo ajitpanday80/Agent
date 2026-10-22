@@ -3,7 +3,7 @@ id: password-or-lockout
 title: Forgot password or account locked out
 category: access
 os: any
-keywords: password, locked out, lockout, account locked, can't sign in, cannot log in, forgot, reset password, unlock
+keywords: password, locked out, lockout, account locked, can't sign in, cannot log in, forgot, reset password, unlock, can't log in, cannot log in, can't sign in to my computer, login not working, log in problem
 sources:
   - https://learn.microsoft.com/training/modules/allow-users-reset-their-password/2-self-service-password-reset
   - https://specopssoft.com/blog/helpdesk-password-reset-best-practices/

@@ -3,7 +3,7 @@ id: phishing-email
 title: Suspicious email or text (phishing)
 category: other
 os: any
-keywords: phishing, suspicious email, spam, scam email, fake email, suspicious link, fake invoice, clicked a link, clicked link, opened attachment, entered password, suspicious text, smishing
+keywords: phishing, suspicious email, spam, scam email, fake email, suspicious link, fake invoice, clicked a link, clicked link, opened attachment, entered password, suspicious text, smishing, entered my password, fake page, fake website, fake login, fake sign in page, typed my password
 sources:
   - https://consumer.ftc.gov/articles/how-recognize-avoid-phishing-scams
   - https://www.cisa.gov/audiences/small-and-medium-businesses/secure-your-business/teach-employees-avoid-phishing

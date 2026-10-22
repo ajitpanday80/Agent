@@ -102,3 +102,24 @@ def test_zoho_sample_contact_is_not_a_client(monkeypatch):
             {"email": "a@acme.example", "lastName": "Real", "account": {"accountName": "Acme"}}]
     monkeypatch.setattr(zoho, "_list_all", lambda *a, **k: rows)
     assert [r["lastName"] for r in zoho.directory(force=True)] == ["Real"]
+
+
+def test_kb_retrieval_eval_has_no_misses_or_false_hits():
+    from msp_agent import kb_eval
+    misses, false_hits = kb_eval.evaluate()
+    assert misses == [], misses
+    assert false_hits == []
+    # every article is the expected answer for at least one phrasing, so none is untested
+    covered = {exp for _, _, exp in kb_eval.CASES}
+    assert {a["id"] for a in kb.ARTICLES} <= covered | {"ransomware-malware"}, \
+        {a["id"] for a in kb.ARTICLES} - covered
+
+
+def test_no_generic_keywords():
+    """Generic phrases make unrelated articles outrank the right one (found this the hard way)."""
+    generic = {"not working", "not responding", "broken", "problem", "issue", "error", "help", "doesn't work",
+               "won't work"}
+    allowed = {"outlook-loading-profile", "onedrive-sync"}      # 'not responding' is the symptom there
+    for a in kb.ARTICLES:
+        bad = generic & set(a["keywords"])
+        assert not bad or a["id"] in allowed, (a["id"], bad)
