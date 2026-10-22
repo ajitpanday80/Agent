@@ -145,3 +145,12 @@ def test_noncritical_category_capped():
     assert decide(category="email", scope="whole_company", severity="stopped").priority == 1
     # security overrides the cap
     assert decide(category="printing", security_concern=True).priority == 1
+
+
+def test_cli_seed_demo(tmp_path, monkeypatch):
+    from msp_agent import cli
+    monkeypatch.setenv("MSP_DB", str(tmp_path / "cli.db"))
+    c = db.connect()
+    for kw in cli.DEMO:
+        cli._create(c, **kw)
+    assert len(tickets.list_tickets(c)) == 4

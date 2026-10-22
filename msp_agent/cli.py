@@ -1,7 +1,29 @@
 """Tiny admin view of the mock PSA.  python -m msp_agent.cli --help"""
 import argparse
 
-from . import db, tickets
+from . import db, escalation, tickets
+
+
+DEMO = [
+    dict(name="Tom Becker", company="Acme Dental", phone="+14155550102", category="printing",
+         summary="Front desk printer offline", scope="single_user", severity="degraded"),
+    dict(name="Maria Lopez", company="Northwind Logistics", phone="+12125550111", category="access",
+         summary="Locked out of account", scope="single_user", severity="stopped"),
+    dict(name="Priya Shah", company="Acme Dental", phone="+14155550101", category="email",
+         summary="Outlook will not open", scope="single_user", severity="stopped"),
+    dict(name="James Okoro", company="Northwind Logistics", phone="+12125550112", category="network_vpn",
+         summary="VPN down for all dispatchers", scope="several_users", severity="stopped"),
+]
+
+
+def _create(conn, *, name, company, phone="+10000000000", category, summary, details="", scope="single_user",
+            severity="degraded", workaround=False, security=False, wants_human=False) -> None:
+    r = tickets.create(conn, caller_name=name, company_name=company, callback_number=phone, category=category,
+                       summary=summary, details=details, scope=scope, severity=severity,
+                       workaround_available=workaround, security_concern=security, caller_requests_human=wants_human)
+    t, d = r["ticket"], r["decision"]
+    print(f"{'created' if r['is_new'] else 'updated'} {t['ref']}  P{t['priority']}  action={d.action}")
+    print("  why:", "; ".join(d.reasons))
 
 
 def main() -> None:
@@ -15,6 +37,17 @@ def main() -> None:
     ia = sub.add_parser("incident-add"); ia.add_argument("title"); ia.add_argument("category")
     ir = sub.add_parser("incident-resolve"); ir.add_argument("id", type=int)
     sub.add_parser("escalations")
+    cr = sub.add_parser("create", help="create a mock ticket by hand (same rules as the voice agent)")
+    cr.add_argument("--name", required=True); cr.add_argument("--company", required=True)
+    cr.add_argument("--phone", default="+10000000000")
+    cr.add_argument("--category", required=True, choices=escalation.CATEGORIES)
+    cr.add_argument("--summary", required=True); cr.add_argument("--details", default="")
+    cr.add_argument("--scope", default="single_user", choices=escalation.SCOPES)
+    cr.add_argument("--severity", default="degraded", choices=escalation.SEVERITIES)
+    cr.add_argument("--workaround", action="store_true")
+    cr.add_argument("--security", action="store_true")
+    cr.add_argument("--wants-human", action="store_true")
+    sub.add_parser("seed-demo", help="add a few example tickets")
     a = p.parse_args()
     conn = db.connect()
 
@@ -39,6 +72,13 @@ def main() -> None:
         print("incident", tickets.create_incident(conn, a.title, a.category))
     elif a.cmd == "incident-resolve":
         tickets.resolve_incident(conn, a.id)
+    elif a.cmd == "create":
+        _create(conn, name=a.name, company=a.company, phone=a.phone, category=a.category, summary=a.summary,
+                details=a.details, scope=a.scope, severity=a.severity, workaround=a.workaround,
+                security=a.security, wants_human=a.wants_human)
+    elif a.cmd == "seed-demo":
+        for kw in DEMO:
+            _create(conn, **kw)
     elif a.cmd == "escalations":
         for r in conn.execute("SELECT * FROM escalations ORDER BY id"):
             print(f"{r['created_at']}  {tickets.ref(r['ticket_id'])}  {r['kind']}  {r['reason']}")
