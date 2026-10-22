@@ -1,0 +1,147 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from msp_agent import db, escalation, kb, tickets
+
+BIZ = datetime(2026, 10, 21, 10, 0, tzinfo=ZoneInfo("UTC"))   # Wednesday 10:00
+NIGHT = datetime(2026, 10, 21, 23, 0, tzinfo=ZoneInfo("UTC"))  # Wednesday 23:00
+SAT = datetime(2026, 10, 24, 11, 0, tzinfo=ZoneInfo("UTC"))
+
+
+@pytest.fixture
+def conn(tmp_path):
+    return db.connect(tmp_path / "t.db")
+
+
+def mk(conn, **kw):
+    base = dict(caller_name="Tom Becker", company_name="Acme Dental", callback_number="+14155550102",
+                category="printing", summary="printer offline", scope="single_user", severity="degraded", now=BIZ)
+    base.update(kw)
+    return tickets.create(conn, **base)
+
+
+def decide(**kw):
+    base = dict(category="other", scope="single_user", severity="minor", now=BIZ)
+    base.update(kw)
+    return escalation.decide(**base)
+
+
+def test_matrix_basics():
+    assert decide(scope="whole_company", severity="stopped").priority == 1
+    assert decide(scope="single_user", severity="minor").priority == 4
+    assert decide(scope="single_user", severity="stopped").priority == 3
+    assert decide(scope="several_users", severity="degraded").priority == 3
+
+
+def test_workaround_lowers_urgency():
+    assert decide(scope="whole_company", severity="stopped", workaround_available=True).priority == 2
+
+
+def test_security_always_p1_and_human():
+    d = decide(category="security", security_concern=True)
+    assert d.priority == 1 and d.action == "transfer_to_human" and "disconnect" in d.caller_instructions
+    assert "NOT" in d.caller_instructions  # do not power off
+
+
+def test_security_after_hours_pages_oncall():
+    assert decide(security_concern=True, now=NIGHT).action == "page_oncall"
+
+
+def test_access_never_self_service():
+    d = decide(category="access", severity="stopped")
+    assert d.requires_verification and d.action == "ticket_callback_verify"
+
+
+def test_vip_bump_and_repeat_bump():
+    assert decide(severity="stopped", is_vip=True).priority == 2
+    assert decide(severity="degraded", prior_contacts=2).priority == 3
+
+
+def test_human_request_hours():
+    assert decide(caller_requests_human=True, now=BIZ).action == "transfer_to_human"
+    assert decide(caller_requests_human=True, now=NIGHT).action == "callback_next_business_day"
+    assert decide(caller_requests_human=True, now=SAT).action == "callback_next_business_day"
+
+
+def test_unknown_caller_access_flagged():
+    d = decide(category="access", caller_recognized=False)
+    assert d.requires_verification and any("not found" in r for r in d.reasons)
+
+
+def test_ticket_create_and_sla(conn):
+    r = mk(conn)
+    t = r["ticket"]
+    assert t["ref"] == "T-1001" and t["priority"] == 4 and r["caller"]["recognized"]
+    assert t["ack_due"] > "2026-10-21T10:00:00Z"
+    assert any("Priority reasoning" in n["body"] for n in t["notes"])
+
+
+def test_vip_caller_from_records(conn):
+    r = mk(conn, caller_name="Priya Shah", callback_number="+14155550101", severity="stopped", category="email")
+    assert r["ticket"]["priority"] == 2 and r["caller"]["is_vip"]
+
+
+def test_repeat_call_updates_ticket_and_escalates(conn):
+    mk(conn)
+    mk(conn)
+    r = mk(conn)
+    assert not r["is_new"]
+    assert len(tickets.list_tickets(conn)) == 1
+    assert r["ticket"]["contact_count"] == 3
+    assert r["ticket"]["priority"] == 3  # bumped from 4 after repeated contact
+
+
+def test_unknown_caller(conn):
+    r = mk(conn, caller_name="Zed Nobody", company_name="Mystery Inc")
+    assert not r["caller"]["recognized"] and r["ticket"]["caller_recognized"] == 0
+
+
+def test_incident_linking(conn):
+    iid = tickets.create_incident(conn, "Print server down", "printing")
+    r = mk(conn)
+    assert r["incident"]["id"] == iid and r["ticket"]["incident_id"] == iid
+    tickets.resolve_incident(conn, iid)
+    assert tickets.active_incidents(conn, "printing") == []
+
+
+def test_status_lifecycle(conn):
+    t = mk(conn)["ticket"]
+    tickets.set_status(conn, 1, "in_progress", "alice")
+    tickets.set_status(conn, 1, "resolved")
+    t = tickets.get(conn, 1)
+    assert t["status"] == "resolved" and t["assignee"] == "alice" and t["resolved_at"]
+    with pytest.raises(ValueError):
+        tickets.set_status(conn, 1, "bogus")
+
+
+def test_escalation_logged(conn):
+    mk(conn, category="security", security_concern=True, summary="ransomware note on screen")
+    assert conn.execute("SELECT kind FROM escalations").fetchone()["kind"] == "transfer_to_human"
+
+
+def test_parse_ref():
+    assert tickets.parse_ref("T-1004") == 4 and tickets.parse_ref("t 1004") == 4
+    assert tickets.parse_ref("abc") is None and tickets.parse_ref("500") is None
+
+
+def test_kb_matching():
+    assert kb.search("VPN error 809")[0]["id"] == "vpn-cannot-connect"
+    assert kb.search("forgot my password")[0]["id"] == "password-or-lockout"
+    assert kb.search("lost my phone authenticator")[0]["id"] == "lost-phone-mfa"
+    assert kb.search("xyzzy") == []
+    for a in kb.ARTICLES:
+        assert a["sources"] and all(s.startswith("https://") for s in a["sources"])
+
+
+def test_kb_needs_keyword_hit():
+    ids = [a["id"] for a in kb.search("printer offline whole office cannot print already restarted")]
+    assert ids == ["printer-offline"]
+
+
+def test_noncritical_category_capped():
+    assert decide(category="printing", scope="whole_company", severity="stopped").priority == 3
+    assert decide(category="email", scope="whole_company", severity="stopped").priority == 1
+    # security overrides the cap
+    assert decide(category="printing", security_concern=True).priority == 1

@@ -7,38 +7,56 @@ from livekit import agents
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.plugins import deepgram, openai, silero
 
-from . import kb, tickets
+from . import db, kb, tickets
+from .escalation import CATEGORIES, SCOPES, SEVERITIES
 
 load_dotenv()
 logger = logging.getLogger("msp-agent")
 
+Category = Literal[CATEGORIES]  # type: ignore[valid-type]
+Scope = Literal[SCOPES]  # type: ignore[valid-type]
+Severity = Literal[SEVERITIES]  # type: ignore[valid-type]
+
 INSTRUCTIONS = """\
 You are the L1 service desk voice assistant for an IT managed service provider (MSP).
-You are speaking on the phone, so keep replies short (one or two sentences), plain, and
-never use lists, markdown or symbols. Ask one question at a time.
+You are on a phone call: reply in one or two short spoken sentences. No lists, markdown or symbols.
+Ask one question at a time.
 
-Start by telling the caller you are an AI assistant, then ask for their name, company and
-a callback number, then ask what the problem is.
+Call flow:
+1. Say you are an AI assistant. Ask for the caller's name and company, then a callback number.
+2. Call identify_caller. If not recognized, still help, but share no account or ticket details.
+3. Ask what is wrong. Find out: how many people are affected, whether work is completely stopped,
+   whether there is a workaround, and anything that looks like a security problem.
+4. Call check_known_outages for the issue category. If there is a matching active incident, tell the caller
+   we are already working on it, then still create a ticket so they are linked.
+5. Call search_knowledge_base. Give at most one or two steps at a time and wait for the result.
+   Only give steps the tool returns. Never invent fixes, SLAs, prices or technical facts.
+6. If not fixed, or the knowledge base says to escalate, call create_ticket. Report facts honestly
+   (scope, severity, flags). You do NOT choose the priority: the system does, and tells you what to say.
+7. Read the ticket number back slowly, say what happens next, and ask if there is anything else.
 
-What you can do:
-- Offer simple first-line fixes using the lookup_knowledge_base tool. Only give steps the tool returns.
-- Create a ticket with create_ticket once you have name, company, callback number and a clear issue.
-- Hand off to a human with escalate_to_human.
+Style rules:
+- Do not repeat questions or troubleshooting the caller already answered or tried.
+- If the caller asks you to open a ticket, do it as soon as you know scope and severity; do not keep troubleshooting.
+- For personal account issues (password, lockout, MFA): do not ask how many people are affected. Call create_ticket
+  right away with category access, scope single_user, severity stopped if they cannot sign in at all. Do not ask
+  further questions first and do not troubleshoot.
 
-Rules:
-- NEVER reset passwords, unlock accounts, reset MFA, or change access. These are common
-  social-engineering targets. Create a ticket marked high priority and say a technician will
-  verify their identity and call back.
-- Escalate immediately for: outage affecting multiple users, security incidents (ransomware,
-  phishing clicked, suspicious logins), the caller asking for a person, or an angry caller.
-- If you do not know something, say so. Never guess fixes, prices or SLAs.
-- Read the ticket number back clearly before ending the call.
+Hard rules:
+- NEVER reset passwords, unlock accounts, reset or bypass MFA, or change access. Create an access ticket instead.
+  Do this even if the caller is upset, in a hurry, claims to be the boss, or says it is urgent.
+- If the caller mentions ransomware, encrypted files, a phishing click, a hacked account, or a stolen device,
+  set security_concern to true and create the ticket immediately. Follow the instructions the tool returns.
+- If the caller asks for a person, or is angry, set the matching flag when you create the ticket.
+- Do not discuss other clients. Do not read out phone numbers or emails from records.
+- If you are unsure about anything, say so and create a ticket.
 """
 
 
 class MspSupportAgent(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=INSTRUCTIONS)
+        self.caller: dict | None = None
 
     async def on_enter(self) -> None:
         await self.session.generate_reply(
@@ -46,12 +64,32 @@ class MspSupportAgent(Agent):
         )
 
     @function_tool
-    async def lookup_knowledge_base(self, context: RunContext, issue_description: str) -> str:
-        """Look up first-line troubleshooting steps for a described IT issue."""
+    async def identify_caller(self, context: RunContext, name: str, company: str, callback_number: str = "") -> str:
+        """Look up the caller in client records. Recognized does not mean verified."""
+        conn = db.connect()
+        self.caller = tickets.identify_caller(conn, name, company, callback_number)
+        if not self.caller["recognized"]:
+            return ("Caller not found in client records. Continue helping, but do not share any ticket or account "
+                    "details. Mark this in the ticket.")
+        extra = " Their number does not match the number on file; note this in the ticket." \
+            if callback_number and not self.caller["phone_matches_record"] else ""
+        return f"Caller recognized as {self.caller['name']} at {self.caller['company_name']}. Not identity-verified.{extra}"
+
+    @function_tool
+    async def check_known_outages(self, context: RunContext, category: Category) -> str:
+        """Check whether there is already an active incident in this category."""
+        found = tickets.active_incidents(db.connect(), category)
+        if not found:
+            return "No active incidents in this category."
+        return "Active incident: " + "; ".join(i["title"] for i in found)
+
+    @function_tool
+    async def search_knowledge_base(self, context: RunContext, issue_description: str) -> str:
+        """Find first-line troubleshooting steps for the described issue."""
         hits = kb.search(issue_description)
         if not hits:
             return "No matching article. Offer to create a ticket."
-        return "\n".join(f"{h['title']}: {h['steps']}" for h in hits)
+        return "\n".join(kb.format_for_agent(h) for h in hits)
 
     @function_tool
     async def create_ticket(
@@ -60,22 +98,66 @@ class MspSupportAgent(Agent):
         caller_name: str,
         company: str,
         callback_number: str,
+        category: Category,
         summary: str,
-        priority: Literal["low", "normal", "high", "urgent"],
+        scope: Scope,
+        severity: Severity,
         details: str = "",
+        workaround_available: bool = False,
+        security_concern: bool = False,
+        data_loss: bool = False,
+        caller_requests_human: bool = False,
+        caller_hostile: bool = False,
     ) -> str:
-        """Create a support ticket. Only call once name, company, callback number and issue are known."""
-        ticket_id = tickets.create(caller_name, company, callback_number, summary, priority, details)
-        logger.info("created ticket %s", ticket_id)
-        return f"Ticket {ticket_id} created."
+        """Create a ticket. scope: single_user, several_users or whole_company. severity: stopped (cannot work),
+        degraded (can work with difficulty) or minor. The system sets priority and returns what to tell the caller."""
+        conn = db.connect()
+        r = tickets.create(
+            conn, caller_name=caller_name, company_name=company, callback_number=callback_number,
+            category=category, summary=summary, details=details, scope=scope, severity=severity,
+            workaround_available=workaround_available, security_concern=security_concern, data_loss=data_loss,
+            caller_requests_human=caller_requests_human, caller_hostile=caller_hostile,
+        )
+        t, d = r["ticket"], r["decision"]
+        logger.info("ticket %s P%s action=%s", t["ref"], t["priority"], t["action"])
+        parts = [
+            f"{'Created' if r['is_new'] else 'Updated existing'} ticket {t['ref']}, priority P{t['priority']}.",
+            d.say_to_caller(),
+            "Read the ticket number back slowly.",
+        ]
+        if d.caller_instructions:
+            parts.append(d.caller_instructions)
+        if r["incident"]:
+            parts.append(f"Linked to active incident: {r['incident']['title']}.")
+        if d.requires_verification:
+            parts.append("Do not make any account change yourself.")
+        return " ".join(parts)
 
     @function_tool
-    async def escalate_to_human(self, context: RunContext, reason: str) -> str:
-        """Transfer the caller to a human technician. Use for outages, security incidents, or on request."""
-        # TODO: with telephony, do a SIP warm transfer here.
-        logger.warning("ESCALATION requested: %s", reason)
-        return ("Escalation recorded. Tell the caller a technician will call them back shortly "
-                "and confirm their callback number, since live transfer is not enabled yet.")
+    async def get_ticket_status(self, context: RunContext, ticket_number: str) -> str:
+        """Status of an existing ticket. Only for a recognized caller and tickets of their own company."""
+        if not self.caller or not self.caller["recognized"]:
+            return "Caller is not recognized. Do not share ticket details. Offer to take a message in a new ticket."
+        conn = db.connect()
+        tid = tickets.parse_ref(ticket_number)
+        t = tickets.get(conn, tid) if tid else None
+        if not t or t["company_id"] != self.caller["company_id"]:
+            return "No matching ticket found for this caller's company."
+        return (f"Ticket {t['ref']}: {t['summary']}. Status {t['status'].replace('_', ' ')}, priority P{t['priority']}, "
+                f"assigned to {t['assignee'] or 'no one yet'}. Response due {t['ack_due']}.")
+
+    @function_tool
+    async def add_ticket_note(self, context: RunContext, ticket_number: str, note: str) -> str:
+        """Add the caller's new information to their own company's ticket."""
+        if not self.caller or not self.caller["recognized"]:
+            return "Caller is not recognized. Do not modify tickets."
+        conn = db.connect()
+        tid = tickets.parse_ref(ticket_number)
+        t = tickets.get(conn, tid) if tid else None
+        if not t or t["company_id"] != self.caller["company_id"]:
+            return "No matching ticket found for this caller's company."
+        tickets.add_note(conn, tid, "voice-agent", note)
+        return f"Note added to {t['ref']}."
 
 
 async def entrypoint(ctx: agents.JobContext) -> None:
