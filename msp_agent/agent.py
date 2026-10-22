@@ -166,6 +166,11 @@ class MspSupportAgent(Agent):
         return f"Note added to {t['ref']}."
 
 
+def prewarm(proc: agents.JobProcess) -> None:
+    """Runs once when a worker process starts, before any call, so the first caller does not wait."""
+    proc.userdata["vad"] = silero.VAD.load()
+
+
 async def entrypoint(ctx: agents.JobContext) -> None:
     session = AgentSession(
         stt=deepgram.STT(model="nova-3", language="en-US"),
@@ -175,10 +180,16 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             api_key=os.environ["OPENROUTER_API_KEY"],
         ),
         tts=deepgram.TTS(model="aura-2-thalia-en"),
-        vad=silero.VAD.load(),
+        vad=ctx.proc.userdata["vad"],
     )
     await session.start(room=ctx.room, agent=MspSupportAgent())
 
 
 if __name__ == "__main__":
-    agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+    agents.cli.run_app(agents.WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        prewarm_fnc=prewarm,
+        # Default is 10s, which a first start on a laptop can exceed (imports + model load).
+        initialize_process_timeout=60,
+        num_idle_processes=1,
+    ))
