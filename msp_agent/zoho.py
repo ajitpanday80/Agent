@@ -17,6 +17,8 @@ logger = logging.getLogger("msp-agent.zoho")
 
 # Zoho's default priority picklist here is High / Medium / Low. Edit if you customized it.
 PRIORITY_MAP = {1: "High", 2: "High", 3: "Medium", 4: "Low"}
+ZOHO_STATUS = {"open": "Open", "in_progress": "Open", "waiting_on_customer": "On Hold", "resolved": "Closed",
+               "closed": "Closed"}
 _token = {"value": None, "expires": 0.0}
 
 
@@ -139,7 +141,7 @@ def sync_ticket(conn: sqlite3.Connection, result: dict) -> dict:
             "description": _description(t, d),
             "priority": PRIORITY_MAP[t["priority"]],
             "channel": "Phone",
-            "status": "Open",
+            "status": ZOHO_STATUS.get(t["status"], "Open"),
         })
         if status not in (200, 201) or "id" not in resp:
             raise RuntimeError(f"create failed {status}: {resp}")

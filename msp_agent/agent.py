@@ -37,6 +37,8 @@ Call flow:
 6. If not fixed, or the knowledge base says to escalate, call create_ticket. Report facts honestly
    (scope, severity, flags). You do NOT choose the priority: the system does, and tells you what to say.
 7. Read the ticket number back slowly, say what happens next, and ask if there is anything else.
+8. If a knowledge-base step FIXED the problem and the caller confirms they need nothing else, call
+   log_resolved_call so the call is recorded. Never use it for security or account-access issues.
 
 Style rules:
 - Do not repeat questions or troubleshooting the caller already answered or tried.
@@ -141,6 +143,31 @@ class MspSupportAgent(Agent):
         if d.requires_verification:
             parts.append("Do not make any account change yourself.")
         return " ".join(parts)
+
+    @function_tool
+    async def log_resolved_call(
+        self,
+        context: RunContext,
+        caller_name: str,
+        company: str,
+        callback_number: str,
+        category: Category,
+        summary: str,
+        resolution: str,
+    ) -> str:
+        """Record a call that you fixed with a knowledge-base step AFTER the caller confirmed it worked and needs
+        nothing else. Not for security or account-access issues; those always need create_ticket."""
+        conn = db.connect()
+        try:
+            r = await asyncio.to_thread(
+                tickets.create_resolved, conn, caller_name=caller_name, company_name=company,
+                callback_number=callback_number, category=category, summary=summary, resolution=resolution)
+        except ValueError as e:
+            return f"Not logged: {e}. Create a normal ticket instead."
+        sync = await asyncio.to_thread(zoho.sync_ticket, conn, r)
+        if not sync.get("ok") and not sync.get("skipped"):
+            logger.error("Zoho sync failed for %s: %s", r["ticket"]["ref"], sync.get("error"))
+        return f"Logged as closed record {r['ticket']['ref']}. You do not need to read this number out."
 
     @function_tool
     async def get_ticket_status(self, context: RunContext, ticket_number: str) -> str:

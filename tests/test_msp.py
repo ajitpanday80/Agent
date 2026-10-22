@@ -186,3 +186,48 @@ def test_zoho_failure_never_raises(conn, monkeypatch):
     monkeypatch.setattr(zoho, "api", lambda *a, **k: (500, {"message": "boom"}))
     out = zoho.sync_ticket(conn, mk(conn))
     assert not out["ok"] and tickets.get(conn, 1)["sync_error"]
+
+
+def test_resolved_call_is_closed_p4_and_not_merged(conn):
+    open_t = mk(conn, category="email")["ticket"]            # an open email ticket for the same person
+    r = tickets.create_resolved(conn, caller_name="Tom Becker", company_name="Acme Dental",
+                                callback_number="+14155550102", category="email",
+                                summary="Outlook hung", resolution="restart")
+    t = r["ticket"]
+    assert t["id"] != open_t["id"] and t["status"] == "closed" and t["priority"] == 4
+    assert t["resolved_at"] and r["decision"].action == "resolved_by_agent"
+    assert tickets.get(conn, open_t["id"])["contact_count"] == 1   # open ticket untouched
+
+
+@pytest.mark.parametrize("cat", ["security", "access"])
+def test_resolved_refused_for_security_and_access(conn, cat):
+    with pytest.raises(ValueError):
+        tickets.create_resolved(conn, caller_name="Tom Becker", company_name="Acme Dental",
+                                callback_number="1", category=cat, summary="x", resolution="y")
+
+
+def test_zoho_status_for_resolved(conn, monkeypatch):
+    from msp_agent import zoho
+    for k in ("ZOHO_ACCOUNTS_URL", "ZOHO_DESK_API_URL", "ZOHO_DESK_ORG_ID", "ZOHO_CLIENT_ID",
+              "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN", "ZOHO_DESK_DEPARTMENT_ID"):
+        monkeypatch.setenv(k, "x")
+    sent = []
+    monkeypatch.setattr(zoho, "api", lambda m, p, b=None, params=None, org=True: (sent.append(b) or (200, {"id": "7"})))
+    r = tickets.create_resolved(conn, caller_name="Tom Becker", company_name="Acme Dental",
+                                callback_number="+14155550102", category="printing", summary="s", resolution="r")
+    assert zoho.sync_ticket(conn, r)["ok"] and sent[0]["status"] == "Closed" and sent[0]["priority"] == "Low"
+
+
+def test_connection_usable_from_worker_thread(tmp_path):
+    """Regression: agent tools create the connection on one thread and use it in asyncio.to_thread."""
+    import asyncio
+    c = db.connect(tmp_path / "thr.db")
+
+    async def go():
+        a = await asyncio.to_thread(mk, c)
+        b = await asyncio.to_thread(tickets.create_resolved, c, caller_name="Tom Becker", company_name="Acme Dental",
+                                    callback_number="1", category="performance", summary="s", resolution="r")
+        return a, b
+
+    a, b = asyncio.run(go())
+    assert a["ticket"]["ref"] == "T-1001" and b["ticket"]["status"] == "closed"

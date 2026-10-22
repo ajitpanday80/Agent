@@ -141,6 +141,36 @@ def create(
             "incident": dict(incident) if incident else None}
 
 
+NEVER_SELF_RESOLVED = ("security", "access")
+
+
+def create_resolved(
+    conn: sqlite3.Connection, *, caller_name: str, company_name: str, callback_number: str, category: str,
+    summary: str, resolution: str, now: datetime | None = None,
+) -> dict:
+    """Record a call the agent fixed with a knowledge-base step. Created already closed, always P4.
+    Security and access issues are refused: those always need a technician."""
+    if category in NEVER_SELF_RESOLVED:
+        raise ValueError(f"{category} issues cannot be logged as resolved by the agent; create a normal ticket")
+    now = now or _now()
+    caller = identify_caller(conn, caller_name, company_name, callback_number)
+    d = escalation.decide(category=category, scope="single_user", severity="minor",
+                          caller_recognized=caller["recognized"], now=now)
+    d.action = "resolved_by_agent"
+    cur = conn.execute(
+        "INSERT INTO tickets(company_id,contact_id,caller_name,company_name,callback_number,category,summary,"
+        "details,priority,impact,urgency,status,caller_recognized,requires_verification,security_flag,action,"
+        "created_at,updated_at,ack_due,resolve_due,resolved_at) "
+        "VALUES (?,?,?,?,?,?,?,?,4,3,3,'closed',?,0,0,?,?,?,?,?,?)",
+        (caller["company_id"], caller["contact_id"], caller_name, company_name, callback_number, category, summary,
+         f"Resolved by the AI agent during the call. Fix given: {resolution}", int(caller["recognized"]),
+         d.action, _iso(now), _iso(now), _iso(now), _iso(now), _iso(now)),
+    )
+    add_note(conn, cur.lastrowid, "voice-agent", f"Caller confirmed fix worked. Fix given: {resolution}")
+    return {"ticket": get(conn, cur.lastrowid), "decision": d, "is_new": True, "caller": caller,
+            "previous_priority": None, "incident": None}
+
+
 def get(conn: sqlite3.Connection, ticket_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
     if not row:

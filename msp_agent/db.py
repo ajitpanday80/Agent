@@ -53,7 +53,9 @@ SEED_CONTACTS = [
 def connect(path: str | os.PathLike | None = None) -> sqlite3.Connection:
     p = Path(path or os.getenv("MSP_DB") or DEFAULT_PATH)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(p)
+    # Agent tools open the connection on the event-loop thread and run the work in a worker thread.
+    # Use is strictly sequential per call, so sharing across threads is safe.
+    conn = sqlite3.connect(p, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
