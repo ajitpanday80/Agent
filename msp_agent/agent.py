@@ -8,7 +8,7 @@ from livekit import agents
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.plugins import deepgram, openai, silero
 
-from . import db, kb, tickets
+from . import db, kb, preflight, tickets
 from .service import CallService, Facts
 from .escalation import CATEGORIES, SCOPES, SEVERITIES
 
@@ -36,7 +36,8 @@ Call flow:
    Report facts honestly (scope, severity, flags). Read the ticket number back slowly.
 5. Call check_known_outages for the category. If there is a matching active incident, tell the caller
    we are already working on it.
-6. Call search_knowledge_base and give at most one or two steps at a time. Only give steps the tool returns.
+6. For computer issues, ask whether the device is Windows or a Mac. Call search_knowledge_base with that and give
+   at most one or two steps at a time. Only give steps the tool returns.
    Never invent fixes, SLAs, prices or technical facts.
 7. If a step FIXES the problem and the caller confirms they need nothing else, call close_ticket with what fixed it.
    If it is not fixed, leave the ticket open and say a technician will follow up.
@@ -91,12 +92,18 @@ class MspSupportAgent(Agent):
         return "Active incident: " + "; ".join(i["title"] for i in found)
 
     @function_tool
-    async def search_knowledge_base(self, context: RunContext, issue_description: str) -> str:
-        """Find first-line troubleshooting steps for the described issue."""
-        hits = kb.search(issue_description)
+    async def search_knowledge_base(
+        self, context: RunContext, issue_description: str, operating_system: Literal["windows", "mac", "unknown"] = "unknown"
+    ) -> str:
+        """Find first-line troubleshooting steps. Ask the caller whether the device is Windows or Mac first and
+        pass it as operating_system; use unknown only if they do not know."""
+        hits = kb.search(issue_description, operating_system=operating_system)
         if not hits:
             return "No matching article. Say a technician will follow up on the ticket."
-        return "\n".join(kb.format_for_agent(h) for h in hits)
+        note = ""
+        if operating_system == "unknown" and len({h["os"] for h in hits} - {"any"}) > 0:
+            note = "The caller's operating system is unknown: ask Windows or Mac before giving steps. "
+        return note + "\n".join(kb.format_for_agent(h) for h in hits)
 
     @function_tool
     async def create_ticket(
@@ -202,6 +209,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
 
 if __name__ == "__main__":
+    preflight.enforce()   # no-op unless MSP_ENV=production; then refuses to start with any blocker failing
     agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
         prewarm_fnc=prewarm,

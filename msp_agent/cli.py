@@ -1,5 +1,6 @@
 """Tiny admin view of the mock PSA.  python -m msp_agent.cli --help"""
 import argparse
+import os
 
 from dotenv import load_dotenv
 
@@ -65,6 +66,8 @@ def main() -> None:
     sd.add_argument("--zoho", action="store_true", help="ALSO push these fake tickets to Zoho Desk")
     cr.add_argument("--zoho", action="store_true", help="ALSO push this ticket to Zoho Desk")
     a = p.parse_args()
+    if os.getenv("MSP_ENV", "").lower() == "production" and a.cmd in ("create", "seed-demo"):
+        raise SystemExit("Refusing: MSP_ENV=production. Mock/demo tickets are for development only.")
     conn = db.connect()
 
     if a.cmd == "list":

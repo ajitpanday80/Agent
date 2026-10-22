@@ -136,7 +136,8 @@ def test_kb_matching():
 
 
 def test_kb_needs_keyword_hit():
-    ids = [a["id"] for a in kb.search("printer offline whole office cannot print already restarted")]
+    ids = [a["id"] for a in kb.search("printer offline whole office cannot print already restarted",
+                                      operating_system="windows")]
     assert ids == ["printer-offline"]
 
 
@@ -234,3 +235,35 @@ def test_connection_usable_from_worker_thread(tmp_path):
 
     a, b = asyncio.run(go())
     assert a["ticket"]["ref"] == "T-1001" and b["ticket"]["status"] == "closed"
+
+
+def test_kb_os_filter():
+    assert kb.search("printer offline", operating_system="mac")[0]["id"] == "printer-mac"
+    assert kb.search("printer offline", operating_system="windows")[0]["id"] == "printer-offline"
+    assert {h["id"] for h in kb.search("printer offline")} == {"printer-mac", "printer-offline"}
+    assert kb.search("wifi not working", operating_system="mac")[0]["id"] == "wifi-mac"
+    assert kb.search("wifi not working", operating_system="windows")[0]["id"] == "wifi-windows"
+
+
+def test_kb_security_routing():
+    assert kb.search("we think we got ransomware, files encrypted")[0]["id"] == "ransomware-malware"
+    assert kb.search("I clicked a link in a suspicious email")[0]["id"] == "phishing-email"
+    assert kb.search("popup says call microsoft your computer is infected")[0]["id"] == "tech-support-scam-popup"
+
+
+def test_kb_files_are_valid_and_voice_safe():
+    ids = [a["id"] for a in kb.ARTICLES]
+    assert len(ids) == len(set(ids)) and len(ids) >= 14
+    for a in kb.ARTICLES:
+        assert a["category"] in escalation.CATEGORIES, a["id"]
+        # command-line fixes belong in technician notes, never in the steps spoken to callers
+        spoken = " ".join(a["steps"]).lower()
+        assert not any(c in spoken for c in ("netsh", "ipconfig", "regedit", "powershell", "sudo ")), a["id"]
+        assert all(len(step.split()) <= 70 for step in a["steps"]), f"{a['id']}: a step is too long to say aloud"
+
+
+def test_kb_require_reviewed_excludes_drafts(monkeypatch):
+    monkeypatch.setenv("KB_REQUIRE_REVIEWED", "true")
+    assert kb.search("printer offline") == []
+    monkeypatch.setenv("KB_REQUIRE_REVIEWED", "false")
+    assert kb.search("printer offline")

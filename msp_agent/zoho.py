@@ -205,7 +205,9 @@ def directory(ttl: int = 300, force: bool = False) -> list[dict]:
     if not force and _dir["rows"] and time.time() - _dir["at"] < ttl:
         return _dir["rows"]
     rows = _list_all("/contacts", {"include": "accounts"}, cap=2000)
-    _dir["rows"] = [r for r in rows if (r.get("email") or "").lower() != UNVERIFIED_EMAIL]
+    # Exclude our placeholder contact and the sample contact every new Zoho Desk portal ships with.
+    _dir["rows"] = [r for r in rows if (r.get("email") or "").lower() != UNVERIFIED_EMAIL
+                    and not (r.get("email") or "").lower().endswith("@zohosupport.com")]
     _dir["at"] = time.time()
     return _dir["rows"]
 

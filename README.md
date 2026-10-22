@@ -28,6 +28,15 @@ Maria Lopez and James Okoro at Northwind Logistics. Anyone else is treated as an
     python -m msp_agent.cli create --name "Tom Becker" --company "Acme Dental" --category email --summary "Outlook down" --severity stopped
 Data lives in `data/msp.db` (gitignored; override with `MSP_DB`).
 
+## Production mode
+`MSP_ENV=production` makes the agent refuse to start until `python -m msp_agent.preflight` has no blockers:
+real keys, Zoho reachable with client contacts that have a company, human-reviewed KB articles only, SLA and
+business hours from your contracts, and explicit attestations for telephony and legal review (a person must set
+these; the code cannot verify them). Production also disables demo contacts and the `create` / `seed-demo` commands.
+
+KB articles in `kb/` are drafts until a person verifies them against the cited sources and your own environment:
+`python -m msp_agent.kb_review list` and `python -m msp_agent.kb_review approve <id> --by "Your Name"`.
+
 ## Zoho Desk is the system of record
 With the `ZOHO_*` values in `.env`, tickets live in Zoho Desk (otherwise a local SQLite mock is used):
 - **Open early:** every call gets a ticket as soon as the issue, scope and severity are known. Subject format:

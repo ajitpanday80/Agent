@@ -64,8 +64,8 @@ def connect(path: str | os.PathLike | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
     _migrate(conn)
-    if not conn.execute("SELECT 1 FROM companies LIMIT 1").fetchone():
-        _seed(conn)
+    if os.getenv("MSP_ENV", "").lower() != "production" and not conn.execute("SELECT 1 FROM companies LIMIT 1").fetchone():
+        _seed(conn)   # demo contacts for development only; never in production
     return conn
 
 
