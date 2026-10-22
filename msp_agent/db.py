@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS ticket_notes (
     id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL REFERENCES tickets(id),
     author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS call_log (
+    id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, backend TEXT NOT NULL, ticket_id TEXT, ticket_ref TEXT,
+    caller_name TEXT, company TEXT, category TEXT, priority INTEGER, action TEXT, outcome TEXT NOT NULL, reasons TEXT
+);
 CREATE TABLE IF NOT EXISTS escalations (
     id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL REFERENCES tickets(id),
     kind TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL

@@ -135,7 +135,7 @@ def sync_ticket(conn: sqlite3.Connection, result: dict) -> dict:
 
         email = _email_on_file(conn, t)
         status, resp = api("POST", "/tickets", {
-            "subject": f"[P{t['priority']}] {t['summary']}",
+            "subject": make_subject(t["priority"], t["category"], t["summary"]),
             "departmentId": _department_id(),
             "contact": _contact(t, email),
             "description": _description(t, d),
@@ -161,3 +161,131 @@ def _email_on_file(conn: sqlite3.Connection, t: dict) -> str | None:
         return None
     row = conn.execute("SELECT email FROM contacts WHERE id=?", (t["contact_id"],)).fetchone()
     return row["email"] if row else None
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Zoho as the system of record: directory, ticket lookup and updates.
+# Search endpoints need the Desk.search.READ scope, which the first token did not have, so lookups list and
+# filter client-side (fine for a pilot-sized directory). Directory is cached briefly to keep calls fast.
+# ---------------------------------------------------------------------------------------------------------
+import re  # noqa: E402
+
+UNVERIFIED_EMAIL = "unverified-caller@voice-agent.invalid"   # shared placeholder contact: never matched as a caller
+SUBJECT_RE = re.compile(r"^\[P(\d)\]\s*\[(\w+)\]")
+_dir = {"at": 0.0, "rows": []}
+
+
+def make_subject(priority: int, category: str, summary: str) -> str:
+    return f"[P{priority}] [{category}] {summary}"
+
+
+def parse_subject(subject: str) -> tuple[int, str] | None:
+    m = SUBJECT_RE.match(subject or "")
+    return (int(m.group(1)), m.group(2)) if m else None
+
+
+def _list_all(path: str, params: dict, cap: int = 1000) -> list[dict]:
+    rows, frm = [], 1
+    while len(rows) < cap:
+        status, resp = api("GET", path, params={**params, "from": frm, "limit": 100})
+        if status == 204:
+            break
+        if status != 200:
+            raise RuntimeError(f"Zoho list {path} failed {status}: {resp}")
+        data = resp.get("data", [])
+        rows += data
+        if len(data) < 100:
+            break
+        frm += 100
+    return rows
+
+
+def directory(ttl: int = 300, force: bool = False) -> list[dict]:
+    """All real contacts with their company, cached for ttl seconds."""
+    if not force and _dir["rows"] and time.time() - _dir["at"] < ttl:
+        return _dir["rows"]
+    rows = _list_all("/contacts", {"include": "accounts"}, cap=2000)
+    _dir["rows"] = [r for r in rows if (r.get("email") or "").lower() != UNVERIFIED_EMAIL]
+    _dir["at"] = time.time()
+    return _dir["rows"]
+
+
+def _digits(phone: str | None) -> str:
+    return re.sub(r"\D", "", phone or "")[-10:]
+
+
+def find_contact(name: str, company: str, phone: str = "") -> dict | None:
+    """Recognized means name AND company both match a contact. Phone is reported separately."""
+    tokens = [t for t in name.lower().split() if t]
+    company = company.strip().lower()
+    if not tokens or not company:
+        return None
+    for c in directory():
+        full = f"{c.get('firstName') or ''} {c.get('lastName') or ''}".lower()
+        acct = ((c.get("account") or {}).get("accountName") or "").lower()
+        if all(t in full for t in tokens) and acct and (company in acct or acct in company):
+            nums = {_digits(c.get("phone")), _digits(c.get("mobile"))} - {""}
+            return {**c, "_phone_match": bool(phone) and _digits(phone) in nums}
+    return None
+
+
+def open_tickets() -> list[dict]:
+    out: list[dict] = []
+    for st in ("Open", "On Hold", "Escalated"):
+        out += _list_all("/tickets", {"status": st, "include": "contacts",
+                                      "fields": "ticketNumber,subject,status,priority"}, cap=500)
+    return out
+
+
+def find_ticket_by_number(number: str) -> dict | None:
+    number = str(number).strip()
+    for t in _list_all("/tickets", {"sortBy": "-createdTime", "include": "contacts",
+                                    "fields": "ticketNumber,subject,status,priority"}, cap=500):
+        if str(t.get("ticketNumber")) == number:
+            return t
+    return None
+
+
+def add_comment(ticket_id: str, text: str) -> None:
+    status, resp = api("POST", f"/tickets/{ticket_id}/comments", {"content": text, "isPublic": False})
+    if status not in (200, 201):
+        raise RuntimeError(f"comment failed {status}: {resp}")
+
+
+def update_ticket(ticket_id: str, fields: dict) -> None:
+    status, resp = api("PATCH", f"/tickets/{ticket_id}", fields)
+    if status != 200:
+        raise RuntimeError(f"update failed {status}: {resp}")
+
+
+def push_pending(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Push tickets that were saved locally while Zoho was down. Returns [(local ref, result)]."""
+    out = []
+    rows = conn.execute("SELECT * FROM tickets WHERE zoho_id IS NULL AND sync_error LIKE 'pending:%'").fetchall()
+    for r in rows:
+        ref = f"T-{1000 + r['id']}"
+        try:
+            notes = conn.execute("SELECT author, body FROM ticket_notes WHERE ticket_id=? ORDER BY id",
+                                 (r["id"],)).fetchall()
+            payload = {
+                "subject": make_subject(r["priority"], r["category"], r["summary"]),
+                "departmentId": _department_id(),
+                "description": "Saved locally while Zoho was unreachable.\n"
+                               f"Caller: {r['caller_name']} ({r['company_name']}), callback {r['callback_number']}\n"
+                               + "\n".join(f"[{n['author']}] {n['body']}" for n in notes),
+                "priority": PRIORITY_MAP[r["priority"]], "channel": "Phone",
+                "status": ZOHO_STATUS.get(r["status"], "Open"),
+            }
+            c = find_contact(r["caller_name"], r["company_name"], r["callback_number"])
+            payload["contactId" if c else "contact"] = c["id"] if c else {
+                "lastName": "Unverified Caller", "email": UNVERIFIED_EMAIL}
+            status, resp = api("POST", "/tickets", payload)
+            if status not in (200, 201) or "id" not in resp:
+                raise RuntimeError(f"{status}: {resp}")
+            conn.execute("UPDATE tickets SET zoho_id=?, zoho_number=?, zoho_url=?, sync_error=NULL WHERE id=?",
+                         (resp["id"], resp.get("ticketNumber"), resp.get("webUrl"), r["id"]))
+            conn.commit()
+            out.append((ref, f"pushed as Zoho #{resp.get('ticketNumber')}"))
+        except Exception as e:  # noqa: BLE001
+            out.append((ref, f"FAILED: {e}"))
+    return out

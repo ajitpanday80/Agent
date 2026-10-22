@@ -59,6 +59,8 @@ def main() -> None:
     cr.add_argument("--workaround", action="store_true")
     cr.add_argument("--security", action="store_true")
     cr.add_argument("--wants-human", action="store_true")
+    sub.add_parser("calls", help="call log: one row per ticket action on a call")
+    sub.add_parser("retry-sync", help="push tickets saved locally while Zoho was down")
     sd = sub.add_parser("seed-demo", help="add a few example tickets (local only unless --zoho)")
     sd.add_argument("--zoho", action="store_true", help="ALSO push these fake tickets to Zoho Desk")
     cr.add_argument("--zoho", action="store_true", help="ALSO push this ticket to Zoho Desk")
@@ -94,8 +96,24 @@ def main() -> None:
         for kw in DEMO:
             _create(conn, push_zoho=a.zoho, **kw)
     elif a.cmd == "escalations":
-        for r in conn.execute("SELECT * FROM escalations ORDER BY id"):
-            print(f"{r['created_at']}  {tickets.ref(r['ticket_id'])}  {r['kind']}  {r['reason']}")
+        rows = conn.execute("SELECT * FROM call_log WHERE action IN ('transfer_to_human','page_oncall',"
+                            "'callback_next_business_day') ORDER BY id").fetchall()
+        for r in rows:
+            print(f"{r['created_at']}  {r['backend']}:{r['ticket_ref']}  {r['action']}  {r['reasons']}")
+        if not rows:
+            print("no escalations logged")
+    elif a.cmd == "calls":
+        for r in conn.execute("SELECT * FROM call_log ORDER BY id"):
+            print(f"{r['created_at']}  {r['backend']:<5} {str(r['ticket_ref'] or '-'):<8} {r['outcome']:<18} "
+                  f"P{r['priority'] or '-'} {r['category'] or '-':<12} {r['caller_name'] or '?'} / {r['company'] or '?'}")
+    elif a.cmd == "retry-sync":
+        if not zoho.enabled():
+            raise SystemExit("Zoho is not configured")
+        res = zoho.push_pending(conn)
+        for ref, msg in res:
+            print(ref, msg)
+        if not res:
+            print("nothing pending")
 
 
 if __name__ == "__main__":

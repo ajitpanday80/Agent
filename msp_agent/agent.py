@@ -8,7 +8,8 @@ from livekit import agents
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.plugins import deepgram, openai, silero
 
-from . import db, kb, tickets, zoho
+from . import db, kb, tickets
+from .service import CallService, Facts
 from .escalation import CATEGORIES, SCOPES, SEVERITIES
 
 load_dotenv()
@@ -30,15 +31,16 @@ Call flow:
 2. Call identify_caller. If not recognized, still help, but share no account or ticket details.
 3. Ask what is wrong. Find out: how many people are affected, whether work is completely stopped,
    whether there is a workaround, and anything that looks like a security problem.
-4. Call check_known_outages for the issue category. If there is a matching active incident, tell the caller
-   we are already working on it, then still create a ticket so they are linked.
-5. Call search_knowledge_base. Give at most one or two steps at a time and wait for the result.
-   Only give steps the tool returns. Never invent fixes, SLAs, prices or technical facts.
-6. If not fixed, or the knowledge base says to escalate, call create_ticket. Report facts honestly
-   (scope, severity, flags). You do NOT choose the priority: the system does, and tells you what to say.
-7. Read the ticket number back slowly, say what happens next, and ask if there is anything else.
-8. If a knowledge-base step FIXED the problem and the caller confirms they need nothing else, call
-   log_resolved_call so the call is recorded. Never use it for security or account-access issues.
+4. As soon as you know the issue, scope and severity, call create_ticket. EVERY call gets a ticket, even if
+   you expect to fix it. You do NOT choose the priority: the system does, and tells you what to say.
+   Report facts honestly (scope, severity, flags). Read the ticket number back slowly.
+5. Call check_known_outages for the category. If there is a matching active incident, tell the caller
+   we are already working on it.
+6. Call search_knowledge_base and give at most one or two steps at a time. Only give steps the tool returns.
+   Never invent fixes, SLAs, prices or technical facts.
+7. If a step FIXES the problem and the caller confirms they need nothing else, call close_ticket with what fixed it.
+   If it is not fixed, leave the ticket open and say a technician will follow up.
+8. Ask if there is anything else, then say goodbye.
 
 Style rules:
 - Do not repeat questions or troubleshooting the caller already answered or tried.
@@ -59,9 +61,9 @@ Hard rules:
 
 
 class MspSupportAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, service: CallService | None = None) -> None:
         super().__init__(instructions=INSTRUCTIONS)
-        self.caller: dict | None = None
+        self.svc = service or CallService(db.connect())
 
     async def on_enter(self) -> None:
         await self.session.generate_reply(
@@ -72,19 +74,18 @@ class MspSupportAgent(Agent):
     @function_tool
     async def identify_caller(self, context: RunContext, name: str, company: str, callback_number: str = "") -> str:
         """Look up the caller in client records. Recognized does not mean verified."""
-        conn = db.connect()
-        self.caller = tickets.identify_caller(conn, name, company, callback_number)
-        if not self.caller["recognized"]:
+        c = await asyncio.to_thread(self.svc.identify, name, company, callback_number)
+        if not c["recognized"]:
             return ("Caller not found in client records. Continue helping, but do not share any ticket or account "
                     "details. Mark this in the ticket.")
         extra = " Their number does not match the number on file; note this in the ticket." \
-            if callback_number and not self.caller["phone_matches_record"] else ""
-        return f"Caller recognized as {self.caller['name']} at {self.caller['company_name']}. Not identity-verified.{extra}"
+            if callback_number and not c["phone_matches_record"] else ""
+        return f"Caller recognized as {c['name']} at {c['company_name']}. Not identity-verified.{extra}"
 
     @function_tool
     async def check_known_outages(self, context: RunContext, category: Category) -> str:
         """Check whether there is already an active incident in this category."""
-        found = tickets.active_incidents(db.connect(), category)
+        found = tickets.active_incidents(self.svc.conn, category)
         if not found:
             return "No active incidents in this category."
         return "Active incident: " + "; ".join(i["title"] for i in found)
@@ -94,7 +95,7 @@ class MspSupportAgent(Agent):
         """Find first-line troubleshooting steps for the described issue."""
         hits = kb.search(issue_description)
         if not hits:
-            return "No matching article. Offer to create a ticket."
+            return "No matching article. Say a technician will follow up on the ticket."
         return "\n".join(kb.format_for_agent(h) for h in hits)
 
     @function_tool
@@ -115,85 +116,44 @@ class MspSupportAgent(Agent):
         caller_requests_human: bool = False,
         caller_hostile: bool = False,
     ) -> str:
-        """Create a ticket. scope: single_user, several_users or whole_company. severity: stopped (cannot work),
-        degraded (can work with difficulty) or minor. The system sets priority and returns what to tell the caller."""
-        conn = db.connect()
-        r = await asyncio.to_thread(
-            tickets.create,
-            conn, caller_name=caller_name, company_name=company, callback_number=callback_number,
-            category=category, summary=summary, details=details, scope=scope, severity=severity,
-            workaround_available=workaround_available, security_concern=security_concern, data_loss=data_loss,
-            caller_requests_human=caller_requests_human, caller_hostile=caller_hostile,
-        )
-        t, d = r["ticket"], r["decision"]
-        logger.info("ticket %s P%s action=%s", t["ref"], t["priority"], t["action"])
-        # Push to Zoho Desk off the event loop so the call audio is not blocked. Failures are logged, not spoken.
-        sync = await asyncio.to_thread(zoho.sync_ticket, conn, r)
-        if not sync.get("ok") and not sync.get("skipped"):
-            logger.error("Zoho sync failed, ticket %s kept locally: %s", t["ref"], sync.get("error"))
-        parts = [
-            f"{'Created' if r['is_new'] else 'Updated existing'} ticket {t['ref']}, priority P{t['priority']}.",
-            d.say_to_caller(),
-            "Read the ticket number back slowly.",
-        ]
+        """Open a ticket as soon as the issue, scope and severity are known. scope: single_user, several_users or
+        whole_company. severity: stopped (cannot work), degraded (can work with difficulty) or minor. The system sets
+        the priority and returns what to tell the caller."""
+        facts = Facts(caller_name, company, callback_number, category, summary, scope, severity, details,
+                      workaround_available, security_concern, data_loss, caller_requests_human, caller_hostile)
+        o = await asyncio.to_thread(self.svc.open_ticket, facts)
+        d = o.decision
+        logger.info("ticket %s P%s action=%s%s", o.ref, o.priority, d.action, " (saved locally, Zoho down)" if o.fallback else "")
+        parts = [f"{'Opened' if o.is_new else 'Updated existing'} ticket {o.ref}, priority P{o.priority}."]
+        if d.action == "ticket":
+            parts.append("Read the ticket number back slowly, say a technician will follow up if it is not fixed now, "
+                         "then continue with knowledge-base troubleshooting. If a step fixes it, call close_ticket.")
+        else:
+            parts.append(d.say_to_caller())
+            parts.append("Read the ticket number back slowly.")
         if d.caller_instructions:
             parts.append(d.caller_instructions)
-        if r["incident"]:
-            parts.append(f"Linked to active incident: {r['incident']['title']}.")
+        if o.incident:
+            parts.append(f"Linked to active incident: {o.incident['title']}.")
         if d.requires_verification:
             parts.append("Do not make any account change yourself.")
         return " ".join(parts)
 
     @function_tool
-    async def log_resolved_call(
-        self,
-        context: RunContext,
-        caller_name: str,
-        company: str,
-        callback_number: str,
-        category: Category,
-        summary: str,
-        resolution: str,
-    ) -> str:
-        """Record a call that you fixed with a knowledge-base step AFTER the caller confirmed it worked and needs
-        nothing else. Not for security or account-access issues; those always need create_ticket."""
-        conn = db.connect()
-        try:
-            r = await asyncio.to_thread(
-                tickets.create_resolved, conn, caller_name=caller_name, company_name=company,
-                callback_number=callback_number, category=category, summary=summary, resolution=resolution)
-        except ValueError as e:
-            return f"Not logged: {e}. Create a normal ticket instead."
-        sync = await asyncio.to_thread(zoho.sync_ticket, conn, r)
-        if not sync.get("ok") and not sync.get("skipped"):
-            logger.error("Zoho sync failed for %s: %s", r["ticket"]["ref"], sync.get("error"))
-        return f"Logged as closed record {r['ticket']['ref']}. You do not need to read this number out."
+    async def close_ticket(self, context: RunContext, what_fixed_it: str) -> str:
+        """Close the ticket opened on this call, ONLY after a knowledge-base step fixed the problem and the caller
+        confirms they need nothing else. Refused for security, access and escalated tickets."""
+        return await asyncio.to_thread(self.svc.close_ticket, what_fixed_it)
 
     @function_tool
     async def get_ticket_status(self, context: RunContext, ticket_number: str) -> str:
         """Status of an existing ticket. Only for a recognized caller and tickets of their own company."""
-        if not self.caller or not self.caller["recognized"]:
-            return "Caller is not recognized. Do not share ticket details. Offer to take a message in a new ticket."
-        conn = db.connect()
-        tid = tickets.parse_ref(ticket_number)
-        t = tickets.get(conn, tid) if tid else None
-        if not t or t["company_id"] != self.caller["company_id"]:
-            return "No matching ticket found for this caller's company."
-        return (f"Ticket {t['ref']}: {t['summary']}. Status {t['status'].replace('_', ' ')}, priority P{t['priority']}, "
-                f"assigned to {t['assignee'] or 'no one yet'}. Response due {t['ack_due']}.")
+        return await asyncio.to_thread(self.svc.status, ticket_number)
 
     @function_tool
     async def add_ticket_note(self, context: RunContext, ticket_number: str, note: str) -> str:
-        """Add the caller's new information to their own company's ticket."""
-        if not self.caller or not self.caller["recognized"]:
-            return "Caller is not recognized. Do not modify tickets."
-        conn = db.connect()
-        tid = tickets.parse_ref(ticket_number)
-        t = tickets.get(conn, tid) if tid else None
-        if not t or t["company_id"] != self.caller["company_id"]:
-            return "No matching ticket found for this caller's company."
-        tickets.add_note(conn, tid, "voice-agent", note)
-        return f"Note added to {t['ref']}."
+        """Add the caller's new information to the ticket opened on this call."""
+        return await asyncio.to_thread(self.svc.add_note, ticket_number, note)
 
 
 def prewarm(proc: agents.JobProcess) -> None:
@@ -218,10 +178,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
 
     # Diagnostics: shows in the terminal what the agent hears and when it starts/stops speaking.
+    agent = MspSupportAgent()
+
     @session.on("user_input_transcribed")
     def _heard(ev) -> None:
         if ev.is_final:
             logger.info("HEARD: %r", ev.transcript)
+            agent.svc.heard.append(ev.transcript)
 
     @session.on("agent_state_changed")
     def _state(ev) -> None:
@@ -231,7 +194,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     def _error(ev) -> None:
         logger.error("session error: %s", ev.error)
 
-    await session.start(room=ctx.room, agent=MspSupportAgent())
+    async def _end_of_call() -> None:
+        await asyncio.to_thread(agent.svc.end_call)
+
+    ctx.add_shutdown_callback(_end_of_call)   # runs on hang-up too: records dropped calls, notes open tickets
+    await session.start(room=ctx.room, agent=agent)
 
 
 if __name__ == "__main__":

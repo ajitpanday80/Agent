@@ -28,13 +28,26 @@ Maria Lopez and James Okoro at Northwind Logistics. Anyone else is treated as an
     python -m msp_agent.cli create --name "Tom Becker" --company "Acme Dental" --category email --summary "Outlook down" --severity stopped
 Data lives in `data/msp.db` (gitignored; override with `MSP_DB`).
 
-## Zoho Desk sync (optional)
-Fill the `ZOHO_*` lines in `.env` (see `.env.example`). When all are set, every ticket the agent or the CLI creates
-is also pushed to Zoho Desk: subject `[P#] summary`, priority P1/P2=High, P3=Medium, P4=Low, channel Phone, and the
-priority reasoning in the description. A repeat call adds a private comment to the same Zoho ticket instead of
-creating a duplicate. Sync is one-way and failures never interrupt a call (they are logged and stored in the
-ticket's `sync_error`). Check the connection (read-only): `python scripts/zoho_check.py`.
-Region matters: use your data center's domains (`.in`, `.eu`, `.com`). Tokens come from a Zoho API Console Self Client.
+## Zoho Desk is the system of record
+With the `ZOHO_*` values in `.env`, tickets live in Zoho Desk (otherwise a local SQLite mock is used):
+- **Open early:** every call gets a ticket as soon as the issue, scope and severity are known. Subject format:
+  `[P3] [email] summary` (priority and category are parsed from it to detect repeat calls).
+- **Close if fixed:** when a knowledge-base step fixes it and the caller confirms, the agent closes the ticket
+  (comment with the fix, status Closed). Never for security, access, or escalated tickets.
+- **Hang-up safety net:** if the call ends first, an open ticket gets a "call ended" note. If the caller gave a
+  name and number but no ticket exists, a low-priority "Call ended before the issue was captured" ticket is created.
+- **Callers:** recognized only if a Zoho contact matches BOTH name and company (company comes from the contact's
+  Account). Unrecognized callers share one placeholder contact (`Unverified Caller`) so strangers never become
+  "known" contacts. Add your clients as Contacts with an Account in Zoho. VIPs: set `MSP_VIP_EMAILS=a@x.com,b@y.com`.
+- **Repeat calls:** merged into the caller's open ticket of the same category (recognized callers only).
+- **Zoho down:** the ticket is saved locally with `sync_error=pending...`; push later with
+  `python -m msp_agent.cli retry-sync`.
+- **Local files:** `data/msp.db` keeps only the call log (`cli calls`, `cli escalations`), known incidents, and any
+  tickets saved while Zoho was down.
+- Read-only connection check: `python scripts/zoho_check.py`.
+- Lookups list and filter client-side because the token lacks `Desk.search.READ`. Fine for a pilot-sized directory;
+  add that scope to the Self Client for larger ones (not yet implemented).
+- Tests never touch Zoho (`tests/conftest.py` blocks it).
 
 ## How it decides (important)
 The LLM only reports **facts** (category, scope, severity, security/human/hostile flags). `escalation.py` decides
