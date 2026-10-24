@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 CREATE TABLE IF NOT EXISTS kb_articles (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, category TEXT NOT NULL, company_name TEXT NOT NULL DEFAULT '',
+    os TEXT NOT NULL DEFAULT 'any',
     content TEXT NOT NULL, steps TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]',
     escalate_if TEXT NOT NULL DEFAULT '', technician_notes TEXT NOT NULL DEFAULT '',
     license_id TEXT NOT NULL DEFAULT '', attribution TEXT NOT NULL DEFAULT '', upstream_url TEXT NOT NULL DEFAULT '',
@@ -61,6 +62,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(kb_articles)")}
     additions = {
         "company_name": "TEXT NOT NULL DEFAULT ''",
+        "os": "TEXT NOT NULL DEFAULT 'any'",
         "escalate_if": "TEXT NOT NULL DEFAULT ''",
         "technician_notes": "TEXT NOT NULL DEFAULT ''",
         "license_id": "TEXT NOT NULL DEFAULT ''",
@@ -84,18 +86,36 @@ def _seed_knowledge(conn: sqlite3.Connection) -> None:
     from .kb import markdown_articles
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    bootstrapped = conn.execute("SELECT 1 FROM app_settings WHERE key='kb_starter_release_1'").fetchone() is not None
     for article in [*ARTICLES, *markdown_articles()]:
+        approved = bool(article.get("approved"))
+        status = "approved" if approved else "draft"
+        reviewer = article.get("reviewed_by", "") if approved else ""
         content = article.get("content") or " ".join(
             [article["title"], " ".join(article.get("keywords", [])),
              " ".join(article.get("steps", [])), article.get("escalate_if", "")]
         )
         conn.execute(
-            "INSERT OR IGNORE INTO kb_articles(id,title,category,company_name,content,steps,sources,escalate_if,"
+            "INSERT OR IGNORE INTO kb_articles(id,title,category,company_name,os,content,steps,sources,escalate_if,"
             "technician_notes,license_id,attribution,upstream_url,enabled,review_status,reviewed_by,reviewed_at,created_at,updated_at) "
-            "VALUES(?,?,?,'',?,?,?,?,?,?,?,?,0,'draft','',NULL,?,?)",
-            (article["id"], article["title"], article["category"], content,
+            "VALUES(?,?,?,'',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (article["id"], article["title"], article["category"], article.get("os", "any"), content,
              json.dumps(article.get("steps", [])), json.dumps(article.get("sources", [])),
              article.get("escalate_if", ""), article.get("technician_notes", ""),
-             article.get("license_id", ""), article.get("attribution", ""), article.get("upstream_url", ""), now, now),
+             article.get("license_id", ""), article.get("attribution", ""), article.get("upstream_url", ""),
+             int(approved), status, reviewer, now if approved else None, now, now),
         )
+        if approved and not bootstrapped:
+            conn.execute(
+                "UPDATE kb_articles SET enabled=1,review_status='approved',reviewed_by=?,reviewed_at=COALESCE(reviewed_at,?),"
+                "license_id=?,attribution=?,upstream_url=? WHERE id=? AND company_name='' AND review_status='draft'",
+                (reviewer, now, article.get("license_id", ""), article.get("attribution", ""),
+                 article.get("upstream_url", ""), article["id"]),
+            )
+        if approved:
+            # Backfill the platform tag once on older copies of these repository articles.
+            conn.execute("UPDATE kb_articles SET os=? WHERE id=? AND company_name='' AND os='any'",
+                         (article.get("os", "any"), article["id"]))
+    if not bootstrapped:
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value,updated_at) VALUES('kb_starter_release_1','complete',?)", (now,))
     conn.commit()

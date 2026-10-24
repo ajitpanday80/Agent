@@ -163,10 +163,13 @@ def markdown_articles() -> list[dict]:
         escalation_notes = sections.get("escalate if", "").strip()
         content = " ".join((title, meta.get("keywords", "").replace(",", " "), *steps, escalation_notes))
         articles.append({"id": article_id, "title": title, "category": category, "content": content,
+                         "os": meta.get("os", "any").lower(),
                          "steps": steps, "sources": sources, "escalate_if": escalation_notes,
                          "technician_notes": sections.get("technician notes", "").strip(),
                          "license_id": meta.get("license", ""), "attribution": meta.get("attribution", ""),
-                         "upstream_url": meta.get("upstream_url", "")})
+                         "upstream_url": meta.get("upstream_url", ""),
+                         "approved": meta.get("status", "draft").lower() == "approved",
+                         "reviewed_by": meta.get("reviewed_by", "")})
     return articles
 
 
@@ -198,6 +201,11 @@ def search_index(query: str, conn: sqlite3.Connection, limit: int = 3,
     terms = _tokens(query) - STOPWORDS
     if not terms:
         return []
+    query_tokens = _tokens(query)
+    platform = "mac" if query_tokens & {"mac", "macos", "macbook", "imac"} else (
+        "windows" if query_tokens & {"windows", "win11", "win10", "pc"} else "")
+    if platform:
+        terms -= {"mac", "macos", "macbook", "imac", "windows", "win11", "win10", "pc"}
     if company_name == "*":
         rows = [dict(r) for r in conn.execute("SELECT * FROM kb_articles WHERE enabled=1 ORDER BY updated_at DESC")]
     elif company_name:
@@ -208,6 +216,8 @@ def search_index(query: str, conn: sqlite3.Connection, limit: int = 3,
     else:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM kb_articles WHERE enabled=1 AND company_name='' ORDER BY updated_at DESC")]
+    if platform:
+        rows = [row for row in rows if row.get("os", "any") in ("any", platform)]
     # Never fall back to bundled advice: only reviewed, enabled DB articles are production content.
     if not rows:
         return []
@@ -237,7 +247,11 @@ def search_index(query: str, conn: sqlite3.Connection, limit: int = 3,
                 score *= 1.25
             scored.append((score, row, steps, sources))
     scored.sort(key=lambda item: (-item[0], item[1]["title"].lower()))
+    if scored:
+        # Avoid returning weak lexical matches as if they were relevant troubleshooting advice.
+        scored = [item for item in scored if item[0] >= scored[0][0] * 0.55]
     return [{"id": row["id"], "title": row["title"], "category": row["category"],
+             "os": row.get("os", "any"),
              "company_name": row.get("company_name", ""), "content": row["content"], "steps": steps, "sources": sources,
              "escalate_if": row.get("escalate_if", ""),
              "license_id": row.get("license_id", ""), "attribution": row.get("attribution", ""),

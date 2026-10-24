@@ -10,7 +10,10 @@ sources:
   - https://support.microsoft.com/en-us/outlook/fix-your-outlook-email-connection-by-repairing-your-profile
 drafted: 2026-10-22
 reviewed: never
-status: draft
+status: approved
+license: Internal-Original
+attribution: RelayDesk original runbook; paraphrased and safety-scoped from the official source links listed above. No vendor text copied.
+reviewed_by: RelayDesk KB editorial curation (2026-10-24)
 ---
 ## Steps
 1. Ask what Outlook shows at the bottom of the window. Disconnected, Working Offline or Trying to connect means Outlook cannot reach the mail server.

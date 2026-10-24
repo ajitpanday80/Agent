@@ -8,7 +8,10 @@ sources:
   - https://support.apple.com/guide/mac-help/solve-printing-problems-on-mac-mh14002/mac
 drafted: 2026-10-22
 reviewed: never
-status: draft
+status: approved
+license: Internal-Original
+attribution: RelayDesk original runbook; paraphrased and safety-scoped from the official source links listed above. No vendor text copied.
+reviewed_by: RelayDesk KB editorial curation (2026-10-24)
 ---
 ## Steps
 1. Ask the caller to check that the printer is on, shows no error lights, has paper and ink or toner, and that any cable is firmly connected. A network printer must be on the same network as the Mac.

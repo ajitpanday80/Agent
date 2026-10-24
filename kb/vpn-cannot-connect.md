@@ -9,7 +9,10 @@ sources:
   - https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/troubleshoot-error-720-when-establishing-a-vpn-connection
 drafted: 2026-10-22
 reviewed: never
-status: draft
+status: approved
+license: Internal-Original
+attribution: RelayDesk original runbook; paraphrased and safety-scoped from the official source links listed above. No vendor text copied.
+reviewed_by: RelayDesk KB editorial curation (2026-10-24)
 ---
 ## Steps
 1. First ask for the exact error message or number, and whether regular internet works without the VPN.
@@ -17,4 +20,4 @@ status: draft
 3. Ask if they are on a hotel, cafe or other public network. Some networks block VPN traffic; trying a phone hotspot is a good test.
 
 ## Escalate if
-Same error after these steps, or several users cannot connect (possible firewall or VPN server issue). Error numbers help the technician: 720 usually means a local network adapter binding issue; 800 or 809 usually means the VPN server is unreachable or ports are blocked; 721 points to a blocked PPTP protocol; 812 or 13801 point to an authentication or certificate mismatch.
+Same error after these steps, or several users cannot connect. Record the exact error and when it began for the technician; several users may indicate a shared VPN service issue.

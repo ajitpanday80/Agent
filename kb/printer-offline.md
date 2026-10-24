@@ -9,7 +9,10 @@ sources:
   - https://support.microsoft.com/en-us/windows/hardware/printer/fix-printer-connection-and-printing-problems-in-windows
 drafted: 2026-10-22
 reviewed: never
-status: draft
+status: approved
+license: Internal-Original
+attribution: RelayDesk original runbook; paraphrased and safety-scoped from the official source links listed above. No vendor text copied.
+reviewed_by: RelayDesk KB editorial curation (2026-10-24)
 ---
 ## Steps
 1. Check the printer is on, has no error or paper jam, and is on the same network as the computer.

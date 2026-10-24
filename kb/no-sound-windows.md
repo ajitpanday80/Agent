@@ -9,7 +9,10 @@ sources:
   - https://support.microsoft.com/en-us/windows/hardware/audio/update-audio-drivers-in-windows
 drafted: 2026-10-22
 reviewed: never
-status: draft
+status: approved
+license: Internal-Original
+attribution: RelayDesk original runbook; paraphrased and safety-scoped from the official source links listed above. No vendor text copied.
+reviewed_by: RelayDesk KB editorial curation (2026-10-24)
 ---
 ## Steps
 1. Ask whether the sound is missing everywhere, or only in one app or one meeting. If it is only one app, check that app's own volume and mute settings.

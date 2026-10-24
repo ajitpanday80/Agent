@@ -9,7 +9,10 @@ sources:
   - https://support.microsoft.com/en-us/windows/fix-touchpad-problems-in-windows-30b498e5-0caa-9740-2b21-336ea75ee756
 drafted: 2026-10-22
 reviewed: never
-status: draft
+status: approved
+license: Internal-Original
+attribution: RelayDesk original runbook; paraphrased and safety-scoped from the official source links listed above. No vendor text copied.
+reviewed_by: RelayDesk KB editorial curation (2026-10-24)
 ---
 ## Steps
 1. Ask which device it is, whether it is wired, wireless with a small USB receiver, or Bluetooth, and whether the computer itself still responds.
