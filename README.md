@@ -23,7 +23,7 @@ Flask admin console and LiveKit voice agent for an MSP service desk. Zoho Desk i
 
 - **Ticket queue:** list and create tickets in Zoho Desk, open ticket conversations, update status, assign Zoho agents, and add private comments.
 - **Customers & agents:** view Zoho accounts and contacts, create accounts/contacts, see support agents, and set local VIP priority flags for contacts.
-- **Knowledge base:** manage sourced troubleshooting articles and safe steps, globally or scoped to an exact Zoho account. The agent uses local BM25-style ranked retrieval, only includes client-specific articles after an exact recognized contact match, and passes retrieved text into the LLM prompt. Pasted runbooks can be imported through the dashboard and are split into searchable chunks. This does not require an embedding service.
+- **Knowledge base:** manage sourced troubleshooting articles and safe steps, globally or scoped to an exact Zoho account. The agent uses local BM25 RAG, only includes client-specific articles after an exact recognized contact match, and passes retrieved steps and source URLs into the LLM prompt. Imported text is chunked and stays draft until review. License basis, attribution, and upstream source are tracked before publication. See [reusable KB sources and review steps](docs/KB_SOURCES.md). This does not require an embedding service.
 - **Voicemail & handoffs:** track staff follow-up, caller requested transfers, and caller-authorized voicemail transcripts alongside Zoho tickets.
 - **Known incidents, routing settings, and audit log:** maintain issue notices, business hours/time zone, after-hours routing preference, and a record of dashboard changes.
 

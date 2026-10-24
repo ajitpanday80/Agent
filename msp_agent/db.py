@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS kb_articles (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, category TEXT NOT NULL, company_name TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL, steps TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]',
     escalate_if TEXT NOT NULL DEFAULT '', technician_notes TEXT NOT NULL DEFAULT '',
+    license_id TEXT NOT NULL DEFAULT '', attribution TEXT NOT NULL DEFAULT '', upstream_url TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 0, review_status TEXT NOT NULL DEFAULT 'draft',
     reviewed_by TEXT NOT NULL DEFAULT '', reviewed_at TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -62,6 +63,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "company_name": "TEXT NOT NULL DEFAULT ''",
         "escalate_if": "TEXT NOT NULL DEFAULT ''",
         "technician_notes": "TEXT NOT NULL DEFAULT ''",
+        "license_id": "TEXT NOT NULL DEFAULT ''",
+        "attribution": "TEXT NOT NULL DEFAULT ''",
+        "upstream_url": "TEXT NOT NULL DEFAULT ''",
         "review_status": "TEXT NOT NULL DEFAULT 'draft'",
         "reviewed_by": "TEXT NOT NULL DEFAULT ''",
         "reviewed_at": "TEXT",
@@ -87,10 +91,11 @@ def _seed_knowledge(conn: sqlite3.Connection) -> None:
         )
         conn.execute(
             "INSERT OR IGNORE INTO kb_articles(id,title,category,company_name,content,steps,sources,escalate_if,"
-            "technician_notes,enabled,review_status,reviewed_by,reviewed_at,created_at,updated_at) "
-            "VALUES(?,?,?,'',?,?,?,?,?,0,'draft','',NULL,?,?)",
+            "technician_notes,license_id,attribution,upstream_url,enabled,review_status,reviewed_by,reviewed_at,created_at,updated_at) "
+            "VALUES(?,?,?,'',?,?,?,?,?,?,?,?,0,'draft','',NULL,?,?)",
             (article["id"], article["title"], article["category"], content,
              json.dumps(article.get("steps", [])), json.dumps(article.get("sources", [])),
-             article.get("escalate_if", ""), article.get("technician_notes", ""), now, now),
+             article.get("escalate_if", ""), article.get("technician_notes", ""),
+             article.get("license_id", ""), article.get("attribution", ""), article.get("upstream_url", ""), now, now),
         )
     conn.commit()

@@ -164,7 +164,9 @@ def markdown_articles() -> list[dict]:
         content = " ".join((title, meta.get("keywords", "").replace(",", " "), *steps, escalation_notes))
         articles.append({"id": article_id, "title": title, "category": category, "content": content,
                          "steps": steps, "sources": sources, "escalate_if": escalation_notes,
-                         "technician_notes": sections.get("technician notes", "").strip()})
+                         "technician_notes": sections.get("technician notes", "").strip(),
+                         "license_id": meta.get("license", ""), "attribution": meta.get("attribution", ""),
+                         "upstream_url": meta.get("upstream_url", "")})
     return articles
 
 
@@ -238,6 +240,8 @@ def search_index(query: str, conn: sqlite3.Connection, limit: int = 3,
     return [{"id": row["id"], "title": row["title"], "category": row["category"],
              "company_name": row.get("company_name", ""), "content": row["content"], "steps": steps, "sources": sources,
              "escalate_if": row.get("escalate_if", ""),
+             "license_id": row.get("license_id", ""), "attribution": row.get("attribution", ""),
+             "upstream_url": row.get("upstream_url", ""),
              "score": round(score, 4)} for score, row, steps, sources in scored[:limit]]
 
 
