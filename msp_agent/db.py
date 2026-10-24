@@ -1,4 +1,4 @@
-"""SQLite storage for the mock PSA. Swap for a real PSA API later."""
+"""SQLite storage for KB, incidents, intake, configuration, and audit; tickets live in Zoho Desk."""
 import os
 import sqlite3
 from pathlib import Path
@@ -6,49 +6,37 @@ from pathlib import Path
 DEFAULT_PATH = Path(__file__).resolve().parent.parent / "data" / "msp.db"
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS companies (
-    id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL
-);
-CREATE TABLE IF NOT EXISTS contacts (
-    id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id),
-    name TEXT NOT NULL, phone TEXT, email TEXT, role TEXT, is_vip INTEGER NOT NULL DEFAULT 0
-);
 CREATE TABLE IF NOT EXISTS incidents (
     id INTEGER PRIMARY KEY, title TEXT NOT NULL, category TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, resolved_at TEXT
 );
-CREATE TABLE IF NOT EXISTS tickets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    company_id INTEGER REFERENCES companies(id), contact_id INTEGER REFERENCES contacts(id),
-    caller_name TEXT NOT NULL, company_name TEXT NOT NULL, callback_number TEXT NOT NULL,
-    category TEXT NOT NULL, summary TEXT NOT NULL, details TEXT NOT NULL DEFAULT '',
-    priority INTEGER NOT NULL, impact INTEGER NOT NULL, urgency INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open', assignee TEXT,
-    caller_recognized INTEGER NOT NULL DEFAULT 0, requires_verification INTEGER NOT NULL DEFAULT 0,
-    security_flag INTEGER NOT NULL DEFAULT 0, incident_id INTEGER REFERENCES incidents(id),
-    contact_count INTEGER NOT NULL DEFAULT 1, action TEXT NOT NULL DEFAULT 'ticket',
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    ack_due TEXT NOT NULL, resolve_due TEXT NOT NULL, resolved_at TEXT
+CREATE TABLE IF NOT EXISTS kb_articles (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, category TEXT NOT NULL, company_name TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL, steps TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS ticket_notes (
-    id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL REFERENCES tickets(id),
-    author TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS handoffs (
+    id INTEGER PRIMARY KEY, ticket_id TEXT, kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued', summary TEXT NOT NULL, callback_number TEXT NOT NULL DEFAULT '',
+    transcript TEXT NOT NULL DEFAULT '', assignee TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS escalations (
-    id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL REFERENCES tickets(id),
-    kind TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contact_flags (
+    zoho_contact_id TEXT PRIMARY KEY, is_vip INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ticket_links (
+    fingerprint TEXT NOT NULL, category TEXT NOT NULL, zoho_ticket_id TEXT NOT NULL,
+    contact_count INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
+    PRIMARY KEY(fingerprint,category)
 );
 """
-
-SEED_COMPANIES = ["Acme Dental", "Northwind Logistics"]
-SEED_CONTACTS = [
-    # company, name, phone, email, role, is_vip
-    ("Acme Dental", "Priya Shah", "+14155550101", "priya@acmedental.example", "Owner", 1),
-    ("Acme Dental", "Tom Becker", "+14155550102", "tom@acmedental.example", "Front desk", 0),
-    ("Northwind Logistics", "Maria Lopez", "+12125550111", "maria@northwind.example", "Office manager", 0),
-    ("Northwind Logistics", "James Okoro", "+12125550112", "james@northwind.example", "Dispatcher", 0),
-]
-
 
 def connect(path: str | os.PathLike | None = None) -> sqlite3.Connection:
     p = Path(path or os.getenv("MSP_DB") or DEFAULT_PATH)
@@ -60,27 +48,34 @@ def connect(path: str | os.PathLike | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
     _migrate(conn)
-    if not conn.execute("SELECT 1 FROM companies LIMIT 1").fetchone():
-        _seed(conn)
+    _seed_knowledge(conn)
     return conn
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after the first release (SQLite has no IF NOT EXISTS for columns)."""
-    have = {r["name"] for r in conn.execute("PRAGMA table_info(tickets)")}
-    for col in ("zoho_id", "zoho_number", "zoho_url", "sync_error"):
-        if col not in have:
-            conn.execute(f"ALTER TABLE tickets ADD COLUMN {col} TEXT")
+    """Add columns for newer local KB metadata without touching legacy ticket tables."""
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(kb_articles)")}
+    if "company_name" not in columns:
+        conn.execute("ALTER TABLE kb_articles ADD COLUMN company_name TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
-def _seed(conn: sqlite3.Connection) -> None:
-    for name in SEED_COMPANIES:
-        conn.execute("INSERT INTO companies(name) VALUES (?)", (name,))
-    for company, name, phone, email, role, vip in SEED_CONTACTS:
-        cid = conn.execute("SELECT id FROM companies WHERE name=?", (company,)).fetchone()["id"]
+def _seed_knowledge(conn: sqlite3.Connection) -> None:
+    if conn.execute("SELECT 1 FROM kb_articles LIMIT 1").fetchone():
+        return
+    import json
+    from .kb import ARTICLES
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for article in ARTICLES:
+        content = article.get("content") or " ".join(
+            [article["title"], " ".join(article.get("keywords", [])),
+             " ".join(article.get("steps", [])), article.get("escalate_if", "")]
+        )
         conn.execute(
-            "INSERT INTO contacts(company_id,name,phone,email,role,is_vip) VALUES (?,?,?,?,?,?)",
-            (cid, name, phone, email, role, vip),
+            "INSERT OR IGNORE INTO kb_articles(id,title,category,company_name,content,steps,sources,created_at,updated_at) "
+            "VALUES (?,?,?,'',?,?,?,?,?)",
+            (article["id"], article["title"], article["category"], content,
+             json.dumps(article.get("steps", [])), json.dumps(article.get("sources", [])), now, now),
         )
     conn.commit()

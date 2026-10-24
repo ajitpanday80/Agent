@@ -1,41 +1,22 @@
-"""Tiny admin view of the mock PSA.  python -m msp_agent.cli --help"""
+"""Small Zoho Desk helper CLI. The Flask console is the primary admin interface."""
 import argparse
 
 from dotenv import load_dotenv
 
-from . import db, escalation, tickets, zoho
+from . import db, escalation, tickets
 
 load_dotenv()
 
 
-DEMO = [
-    dict(name="Tom Becker", company="Acme Dental", phone="+14155550102", category="printing",
-         summary="Front desk printer offline", scope="single_user", severity="degraded"),
-    dict(name="Maria Lopez", company="Northwind Logistics", phone="+12125550111", category="access",
-         summary="Locked out of account", scope="single_user", severity="stopped"),
-    dict(name="Priya Shah", company="Acme Dental", phone="+14155550101", category="email",
-         summary="Outlook will not open", scope="single_user", severity="stopped"),
-    dict(name="James Okoro", company="Northwind Logistics", phone="+12125550112", category="network_vpn",
-         summary="VPN down for all dispatchers", scope="several_users", severity="stopped"),
-]
-
-
 def _create(conn, *, name, company, phone="+10000000000", category, summary, details="", scope="single_user",
-            severity="degraded", workaround=False, security=False, wants_human=False, push_zoho=False) -> None:
+            severity="degraded", workaround=False, security=False, wants_human=False) -> None:
     r = tickets.create(conn, caller_name=name, company_name=company, callback_number=phone, category=category,
                        summary=summary, details=details, scope=scope, severity=severity,
                        workaround_available=workaround, security_concern=security, caller_requests_human=wants_human)
     t, d = r["ticket"], r["decision"]
     print(f"{'created' if r['is_new'] else 'updated'} {t['ref']}  P{t['priority']}  action={d.action}")
     print("  why:", "; ".join(d.reasons))
-    if not push_zoho:
-        print("  (local only; add --zoho to also push to Zoho Desk)")
-        return
-    sync = zoho.sync_ticket(conn, r)
-    if sync.get("ok"):
-        print(f"  zoho: {sync.get('number') or sync['zoho_id']}  {sync.get('url') or ''}")
-    elif not sync.get("skipped"):
-        print("  zoho sync FAILED:", sync.get("error"))
+    print(f"  Zoho Desk ticket #{t['ref']}  id={t['id']}")
 
 
 def main() -> None:
@@ -48,8 +29,8 @@ def main() -> None:
     st.add_argument("--assignee")
     ia = sub.add_parser("incident-add"); ia.add_argument("title"); ia.add_argument("category")
     ir = sub.add_parser("incident-resolve"); ir.add_argument("id", type=int)
-    sub.add_parser("escalations")
-    cr = sub.add_parser("create", help="create a mock ticket by hand (same rules as the voice agent)")
+    sub.add_parser("handoffs")
+    cr = sub.add_parser("create", help="create a Zoho Desk ticket (same rules as the voice agent)")
     cr.add_argument("--name", required=True); cr.add_argument("--company", required=True)
     cr.add_argument("--phone", default="+10000000000")
     cr.add_argument("--category", required=True, choices=escalation.CATEGORIES)
@@ -59,9 +40,6 @@ def main() -> None:
     cr.add_argument("--workaround", action="store_true")
     cr.add_argument("--security", action="store_true")
     cr.add_argument("--wants-human", action="store_true")
-    sd = sub.add_parser("seed-demo", help="add a few example tickets (local only unless --zoho)")
-    sd.add_argument("--zoho", action="store_true", help="ALSO push these fake tickets to Zoho Desk")
-    cr.add_argument("--zoho", action="store_true", help="ALSO push this ticket to Zoho Desk")
     a = p.parse_args()
     conn = db.connect()
 
@@ -73,11 +51,8 @@ def main() -> None:
         if not t:
             raise SystemExit("not found")
         for k in ("ref", "status", "priority", "category", "caller_name", "company_name", "callback_number",
-                  "summary", "details", "action", "caller_recognized", "requires_verification",
-                  "security_flag", "contact_count", "assignee", "ack_due", "resolve_due"):
-            print(f"{k:>22}: {t[k]}")
-        for n in t["notes"]:
-            print(f"  [{n['created_at']}] {n['author']}: {n['body']}")
+                  "summary", "details", "assignee", "ack_due"):
+            print(f"{k:>22}: {t.get(k, '')}")
     elif a.cmd == "note":
         tickets.add_note(conn, tickets.parse_ref(a.ref), "technician", a.text)
     elif a.cmd == "status":
@@ -89,13 +64,10 @@ def main() -> None:
     elif a.cmd == "create":
         _create(conn, name=a.name, company=a.company, phone=a.phone, category=a.category, summary=a.summary,
                 details=a.details, scope=a.scope, severity=a.severity, workaround=a.workaround,
-                security=a.security, wants_human=a.wants_human, push_zoho=a.zoho)
-    elif a.cmd == "seed-demo":
-        for kw in DEMO:
-            _create(conn, push_zoho=a.zoho, **kw)
-    elif a.cmd == "escalations":
-        for r in conn.execute("SELECT * FROM escalations ORDER BY id"):
-            print(f"{r['created_at']}  {tickets.ref(r['ticket_id'])}  {r['kind']}  {r['reason']}")
+                security=a.security, wants_human=a.wants_human)
+    elif a.cmd == "handoffs":
+        for r in conn.execute("SELECT * FROM handoffs ORDER BY id DESC"):
+            print(f"{r['created_at']}  {r['kind']}  {r['status']}  #{r['ticket_id'] or 'no Zoho ticket'}  {r['summary']}")
 
 
 if __name__ == "__main__":

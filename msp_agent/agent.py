@@ -8,7 +8,7 @@ from livekit import agents
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.plugins import deepgram, openai, silero
 
-from . import db, kb, tickets, zoho
+from . import db, kb, tickets
 from .escalation import CATEGORIES, SCOPES, SEVERITIES
 
 load_dotenv()
@@ -73,7 +73,7 @@ class MspSupportAgent(Agent):
     async def identify_caller(self, context: RunContext, name: str, company: str, callback_number: str = "") -> str:
         """Look up the caller in client records. Recognized does not mean verified."""
         conn = db.connect()
-        self.caller = tickets.identify_caller(conn, name, company, callback_number)
+        self.caller = await asyncio.to_thread(tickets.identify_caller, conn, name, company, callback_number)
         if not self.caller["recognized"]:
             return ("Caller not found in client records. Continue helping, but do not share any ticket or account "
                     "details. Mark this in the ticket.")
@@ -92,7 +92,8 @@ class MspSupportAgent(Agent):
     @function_tool
     async def search_knowledge_base(self, context: RunContext, issue_description: str) -> str:
         """Find first-line troubleshooting steps for the described issue."""
-        hits = kb.search(issue_description)
+        company_name = self.caller.get("company_name") if self.caller and self.caller.get("recognized") else None
+        hits = kb.search_index(issue_description, db.connect(), company_name=company_name)
         if not hits:
             return "No matching article. Offer to create a ticket."
         return "\n".join(kb.format_for_agent(h) for h in hits)
@@ -118,19 +119,34 @@ class MspSupportAgent(Agent):
         """Create a ticket. scope: single_user, several_users or whole_company. severity: stopped (cannot work),
         degraded (can work with difficulty) or minor. The system sets priority and returns what to tell the caller."""
         conn = db.connect()
-        r = await asyncio.to_thread(
-            tickets.create,
-            conn, caller_name=caller_name, company_name=company, callback_number=callback_number,
-            category=category, summary=summary, details=details, scope=scope, severity=severity,
-            workaround_available=workaround_available, security_concern=security_concern, data_loss=data_loss,
-            caller_requests_human=caller_requests_human, caller_hostile=caller_hostile,
-        )
+        try:
+            r = await asyncio.to_thread(
+                tickets.create,
+                conn, caller_name=caller_name, company_name=company, callback_number=callback_number,
+                category=category, summary=summary, details=details, scope=scope, severity=severity,
+                workaround_available=workaround_available, security_concern=security_concern, data_loss=data_loss,
+                caller_requests_human=caller_requests_human, caller_hostile=caller_hostile,
+            )
+        except Exception as e:
+            logger.exception("Zoho ticket creation failed")
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("INSERT INTO handoffs(kind,summary,callback_number,transcript,created_at,updated_at) "
+                         "VALUES('zoho_unavailable',?,?,?,?,?)",
+                         (summary, callback_number,
+                          f"Caller {caller_name} at {company}. {category}; {scope}; {severity}; {details}; {e}", now, now))
+            conn.commit()
+            return ("Zoho Desk could not create the ticket. I saved the request in the staff intake queue, "
+                    "but there is no Zoho ticket number yet. A technician must follow up.")
         t, d = r["ticket"], r["decision"]
         logger.info("ticket %s P%s action=%s", t["ref"], t["priority"], t["action"])
-        # Push to Zoho Desk off the event loop so the call audio is not blocked. Failures are logged, not spoken.
-        sync = await asyncio.to_thread(zoho.sync_ticket, conn, r)
-        if not sync.get("ok") and not sync.get("skipped"):
-            logger.error("Zoho sync failed, ticket %s kept locally: %s", t["ref"], sync.get("error"))
+        if d.action in ("transfer_to_human", "page_oncall", "callback_next_business_day", "voicemail"):
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("INSERT INTO handoffs(ticket_id,kind,summary,callback_number,transcript,created_at,updated_at) "
+                         "VALUES (?,?,?,?,?,?,?)",
+                         (t["id"], d.action, t["summary"], callback_number, details, now, now))
+            conn.commit()
         parts = [
             f"{'Created' if r['is_new'] else 'Updated existing'} ticket {t['ref']}, priority P{t['priority']}.",
             d.say_to_caller(),
@@ -140,6 +156,8 @@ class MspSupportAgent(Agent):
             parts.append(d.caller_instructions)
         if r["incident"]:
             parts.append(f"Linked to active incident: {r['incident']['title']}.")
+        if d.action in ("transfer_to_human", "page_oncall", "callback_next_business_day", "voicemail"):
+            parts.append("The request is in the staff handoff queue.")
         if d.requires_verification:
             parts.append("Do not make any account change yourself.")
         return " ".join(parts)
@@ -164,36 +182,28 @@ class MspSupportAgent(Agent):
                 callback_number=callback_number, category=category, summary=summary, resolution=resolution)
         except ValueError as e:
             return f"Not logged: {e}. Create a normal ticket instead."
-        sync = await asyncio.to_thread(zoho.sync_ticket, conn, r)
-        if not sync.get("ok") and not sync.get("skipped"):
-            logger.error("Zoho sync failed for %s: %s", r["ticket"]["ref"], sync.get("error"))
+        except Exception as e:
+            logger.exception("Zoho could not record resolved call")
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("INSERT INTO handoffs(kind,summary,callback_number,transcript,created_at,updated_at) "
+                         "VALUES('zoho_unavailable',?,?,?,?,?)",
+                         (summary, callback_number,
+                          f"Caller {caller_name} at {company}. Resolved call: {resolution}. Zoho error: {e}", now, now))
+            conn.commit()
+            return "Zoho Desk could not record the resolved call. I saved it to staff intake, but there is no Zoho ticket number."
         return f"Logged as closed record {r['ticket']['ref']}. You do not need to read this number out."
 
     @function_tool
     async def get_ticket_status(self, context: RunContext, ticket_number: str) -> str:
-        """Status of an existing ticket. Only for a recognized caller and tickets of their own company."""
-        if not self.caller or not self.caller["recognized"]:
-            return "Caller is not recognized. Do not share ticket details. Offer to take a message in a new ticket."
-        conn = db.connect()
-        tid = tickets.parse_ref(ticket_number)
-        t = tickets.get(conn, tid) if tid else None
-        if not t or t["company_id"] != self.caller["company_id"]:
-            return "No matching ticket found for this caller's company."
-        return (f"Ticket {t['ref']}: {t['summary']}. Status {t['status'].replace('_', ' ')}, priority P{t['priority']}, "
-                f"assigned to {t['assignee'] or 'no one yet'}. Response due {t['ack_due']}.")
+        """Ticket status is withheld until a provider supplies trusted caller identity verification."""
+        return ("I can't verify caller identity on this line yet, so I can't disclose ticket details. "
+                "I can create a callback request for the support team.")
 
     @function_tool
     async def add_ticket_note(self, context: RunContext, ticket_number: str, note: str) -> str:
-        """Add the caller's new information to their own company's ticket."""
-        if not self.caller or not self.caller["recognized"]:
-            return "Caller is not recognized. Do not modify tickets."
-        conn = db.connect()
-        tid = tickets.parse_ref(ticket_number)
-        t = tickets.get(conn, tid) if tid else None
-        if not t or t["company_id"] != self.caller["company_id"]:
-            return "No matching ticket found for this caller's company."
-        tickets.add_note(conn, tid, "voice-agent", note)
-        return f"Note added to {t['ref']}."
+        """Ticket changes require staff identity verification; callers can create a callback request instead."""
+        return "I can't verify caller identity on this line yet, so I can't change ticket details. I can take a message for staff."
 
 
 def prewarm(proc: agents.JobProcess) -> None:

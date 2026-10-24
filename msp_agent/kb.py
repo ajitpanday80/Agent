@@ -1,6 +1,9 @@
 """L1 knowledge base. Steps are paraphrased from the cited vendor/government pages and shortened for
 voice. Keep each step small enough to say out loud. Review against current docs before production use."""
 import re
+import json
+import math
+import sqlite3
 
 ARTICLES = [
     {
@@ -144,6 +147,58 @@ def search(query: str, limit: int = 2) -> list[dict]:
     return [a for _, a in scored[:limit]]
 
 
+def search_index(query: str, conn: sqlite3.Connection, limit: int = 3,
+                 company_name: str | None = None) -> list[dict]:
+    """Local BM25-style retrieval over the editable knowledge library; results ground voice answers."""
+    terms = _tokens(query) - STOPWORDS
+    if not terms:
+        return []
+    if company_name == "*":
+        rows = [dict(r) for r in conn.execute("SELECT * FROM kb_articles WHERE enabled=1 ORDER BY updated_at DESC")]
+    elif company_name:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM kb_articles WHERE enabled=1 AND (company_name='' OR lower(company_name)=lower(?)) "
+            "ORDER BY CASE WHEN lower(company_name)=lower(?) THEN 0 ELSE 1 END,updated_at DESC",
+            (company_name, company_name))]
+    else:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM kb_articles WHERE enabled=1 AND company_name='' ORDER BY updated_at DESC")]
+    if not rows and company_name != "*":
+        return search(query, limit)
+    corpus = []
+    for row in rows:
+        try:
+            steps = json.loads(row["steps"])
+            sources = json.loads(row["sources"])
+        except (ValueError, TypeError):
+            steps, sources = [], []
+        text = " ".join((row["title"], row["category"], row["content"], " ".join(steps)))
+        corpus.append((row, steps, sources, _tokens(text)))
+    avg_len = max(1, sum(len(doc[3]) for doc in corpus) / len(corpus))
+    scored = []
+    for row, steps, sources, tokens in corpus:
+        matched = terms & tokens
+        if not matched:
+            continue
+        score = 0.0
+        for term in matched:
+            df = sum(term in doc[3] for doc in corpus)
+            idf = math.log(1 + (len(corpus) - df + 0.5) / (df + 0.5))
+            tf = sum(1 for t in re.findall(r"[a-z0-9']+", (row["title"] + " " + row["content"]).lower()) if t == term)
+            score += idf * (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * len(tokens) / avg_len))
+        if score > 0:
+            if company_name not in (None, "*") and row.get("company_name"):
+                score *= 1.25
+            scored.append((score, row, steps, sources))
+    scored.sort(key=lambda item: (-item[0], item[1]["title"].lower()))
+    return [{"id": row["id"], "title": row["title"], "category": row["category"],
+             "company_name": row.get("company_name", ""), "content": row["content"], "steps": steps, "sources": sources,
+             "score": round(score, 4)} for score, row, steps, sources in scored[:limit]]
+
+
 def format_for_agent(article: dict) -> str:
     steps = " ".join(f"Step {i}: {s}" for i, s in enumerate(article["steps"], 1))
+    if article.get("content"):
+        scope = f"For {article['company_name']}. " if article.get("company_name") else ""
+        return f"{scope}{article['title']}. {steps or article['content']} Sources: {', '.join(article.get('sources', []))}"
     return f"{article['title']}. {steps} Escalate if: {article['escalate_if']}"

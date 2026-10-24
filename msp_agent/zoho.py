@@ -1,19 +1,14 @@
-"""Push tickets to Zoho Desk (one-way). The local DB and escalation rules stay the source of truth.
+"""Zoho Desk API client. Zoho Desk is the authoritative ticket system.
 
 Auth: Zoho OAuth "Self Client" refresh token -> short-lived access token (cached, refreshed on expiry/401).
 API docs: https://desk.zoho.com/DeskAPIDocument  (use your data center's domain, e.g. desk.zoho.in)
-Sync must never break a live call: every public function returns a result instead of raising.
 """
 import json
-import logging
 import os
-import sqlite3
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-
-logger = logging.getLogger("msp-agent.zoho")
 
 # Zoho's default priority picklist here is High / Medium / Low. Edit if you customized it.
 PRIORITY_MAP = {1: "High", 2: "High", 3: "Medium", 4: "Low"}
@@ -29,7 +24,7 @@ def _cfg(name: str) -> str:
 def enabled() -> bool:
     need = ("ZOHO_ACCOUNTS_URL", "ZOHO_DESK_API_URL", "ZOHO_DESK_ORG_ID", "ZOHO_CLIENT_ID",
             "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN")
-    return all(_cfg(n) for n in need) and _cfg("ZOHO_SYNC").lower() != "false"
+    return all(_cfg(n) for n in need)
 
 
 def _http(method: str, url: str, headers: dict, body: dict | None = None, form: dict | None = None):
@@ -78,6 +73,82 @@ def api(method: str, path: str, body: dict | None = None, params: dict | None = 
     return status, resp
 
 
+def request(method: str, path: str, body: dict | None = None, params: dict | None = None) -> dict:
+    """Perform a Zoho operation and raise a useful error for staff or voice workflow handling."""
+    if not enabled():
+        raise RuntimeError("Zoho Desk is not configured. Set the ZOHO_* values before serving tickets.")
+    status, resp = api(method, path, body=body, params=params)
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"Zoho Desk {method} {path} failed ({status}): {resp}")
+    return resp
+
+
+def list_tickets(*, offset: int = 1, limit: int = 50) -> list[dict]:
+    resp = request("GET", "/tickets", params={"from": offset, "limit": min(max(limit, 1), 50),
+                                                "sortBy": "-modifiedTime"})
+    return resp.get("data", [])
+
+
+def list_agents(*, offset: int = 1, limit: int = 50) -> list[dict]:
+    return request("GET", "/agents", params={"from": offset, "limit": min(max(limit, 1), 50)}).get("data", [])
+
+
+def list_contacts(*, offset: int = 0, limit: int = 50) -> list[dict]:
+    return request("GET", "/contacts", params={"from": offset, "limit": min(max(limit, 1), 50),
+                                                  "include": "accounts"}).get("data", [])
+
+
+def list_accounts(*, offset: int = 0, limit: int = 50) -> list[dict]:
+    return request("GET", "/accounts", params={"from": offset, "limit": min(max(limit, 1), 50)}).get("data", [])
+
+
+def create_contact(payload: dict) -> dict:
+    return request("POST", "/contacts", payload)
+
+
+def create_account(payload: dict) -> dict:
+    return request("POST", "/accounts", payload)
+
+
+def match_contact(name: str, company: str, phone: str) -> dict | None:
+    digits = "".join(c for c in (phone or "") if c.isdigit())[-10:]
+    if not digits or not name.strip() or not company.strip():
+        return None
+    wanted = " ".join(name.lower().split())
+    try:
+        rows = request("GET", "/contacts/search", params={"searchStr": phone, "from": 0, "limit": 50}).get("data", [])
+    except RuntimeError:
+        rows = list_contacts()
+    for row in rows:
+        full = " ".join((row.get("firstName", "") + " " + row.get("lastName", "")).lower().split())
+        acct = row.get("account") or {}
+        row_digits = "".join(c for c in (row.get("phone") or "") if c.isdigit())[-10:]
+        if full == wanted and row_digits == digits and (acct.get("accountName", "").strip().lower() == company.strip().lower()):
+            return row
+    return None
+
+
+def get_ticket(ticket_id: str) -> dict:
+    return request("GET", f"/tickets/{urllib.parse.quote(str(ticket_id), safe='')}")
+
+
+def create_ticket(payload: dict) -> dict:
+    return request("POST", "/tickets", payload)
+
+
+def update_ticket(ticket_id: str, payload: dict) -> dict:
+    return request("PATCH", f"/tickets/{urllib.parse.quote(str(ticket_id), safe='')}", payload)
+
+
+def add_comment(ticket_id: str, content: str, *, public: bool = False) -> dict:
+    return request("POST", f"/tickets/{urllib.parse.quote(str(ticket_id), safe='')}/comments",
+                   {"content": content, "isPublic": public})
+
+
+def list_comments(ticket_id: str) -> list[dict]:
+    return request("GET", f"/tickets/{urllib.parse.quote(str(ticket_id), safe='')}/comments").get("data", [])
+
+
 def _department_id() -> str:
     if _cfg("ZOHO_DESK_DEPARTMENT_ID"):
         return _cfg("ZOHO_DESK_DEPARTMENT_ID")
@@ -89,7 +160,7 @@ def _department_id() -> str:
 
 
 def _contact(t: dict, email: str | None) -> dict:
-    parts = t["caller_name"].strip().split(None, 1)
+    parts = t["caller_name"].strip().split(None, 1) or ["Unknown"]
     first, last = (parts[0], parts[1]) if len(parts) == 2 else ("", parts[0])
     c = {"lastName": last, "phone": t["callback_number"]}
     if first:
@@ -101,12 +172,14 @@ def _contact(t: dict, email: str | None) -> dict:
 
 def _description(t: dict, decision) -> str:
     lines = [
-        f"Created by the AI voice agent from a phone call. Local reference: {t['ref']}",
+        f"Created through MSP Helpdesk. Intake reference: {t['ref']}",
         f"Caller: {t['caller_name']} ({t['company_name']}), callback {t['callback_number']}",
         f"Caller recognized in records: {'yes' if t['caller_recognized'] else 'NO (unrecognized caller)'}. "
         "Recognized is not identity-verified.",
         f"Category: {t['category']}. Priority P{t['priority']}. Action: {decision.action}",
         f"Priority reasoning: {'; '.join(decision.reasons)}",
+        f"Target first response: {decision.ack_minutes} minutes. Target resolution: {decision.resolve_hours} hours.",
+        f"Target first response: {decision.ack_minutes} minutes. Target resolution: {decision.resolve_hours} hours.",
     ]
     if decision.requires_verification:
         lines.append("ACCESS REQUEST: do not change anything until a technician verifies the caller's identity.")
@@ -115,49 +188,3 @@ def _description(t: dict, decision) -> str:
     if t["details"]:
         lines.append(f"Details: {t['details']}")
     return "\n".join(lines)
-
-
-def sync_ticket(conn: sqlite3.Connection, result: dict) -> dict:
-    """Push the outcome of tickets.create() to Zoho. Returns {'ok': bool, ...}; never raises."""
-    if not enabled():
-        return {"ok": False, "skipped": True}
-    t, d = result["ticket"], result["decision"]
-    try:
-        if not result["is_new"] and t.get("zoho_id"):
-            status, resp = api("POST", f"/tickets/{t['zoho_id']}/comments", {
-                "content": "Repeat call logged by the voice agent.\n" + _description(t, d), "isPublic": False})
-            if status not in (200, 201):
-                raise RuntimeError(f"comment failed {status}: {resp}")
-            prev = result.get("previous_priority")
-            if prev is not None and prev != t["priority"]:
-                api("PATCH", f"/tickets/{t['zoho_id']}", {"priority": PRIORITY_MAP[t["priority"]]})
-            return {"ok": True, "zoho_id": t["zoho_id"], "updated": True}
-
-        email = _email_on_file(conn, t)
-        status, resp = api("POST", "/tickets", {
-            "subject": f"[P{t['priority']}] {t['summary']}",
-            "departmentId": _department_id(),
-            "contact": _contact(t, email),
-            "description": _description(t, d),
-            "priority": PRIORITY_MAP[t["priority"]],
-            "channel": "Phone",
-            "status": ZOHO_STATUS.get(t["status"], "Open"),
-        })
-        if status not in (200, 201) or "id" not in resp:
-            raise RuntimeError(f"create failed {status}: {resp}")
-        conn.execute("UPDATE tickets SET zoho_id=?, zoho_number=?, zoho_url=?, sync_error=NULL WHERE id=?",
-                     (resp["id"], resp.get("ticketNumber"), resp.get("webUrl"), t["id"]))
-        conn.commit()
-        return {"ok": True, "zoho_id": resp["id"], "number": resp.get("ticketNumber"), "url": resp.get("webUrl")}
-    except Exception as e:  # noqa: BLE001 - a Zoho outage must not break the call
-        logger.error("Zoho sync failed for %s: %s", t["ref"], e)
-        conn.execute("UPDATE tickets SET sync_error=? WHERE id=?", (str(e)[:500], t["id"]))
-        conn.commit()
-        return {"ok": False, "error": str(e)}
-
-
-def _email_on_file(conn: sqlite3.Connection, t: dict) -> str | None:
-    if not t.get("contact_id"):
-        return None
-    row = conn.execute("SELECT email FROM contacts WHERE id=?", (t["contact_id"],)).fetchone()
-    return row["email"] if row else None

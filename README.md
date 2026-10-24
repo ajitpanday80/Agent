@@ -1,58 +1,54 @@
-# MSP L1 Voice Agent
+# MSP Helpdesk
 
-LiveKit Agents + Deepgram (STT/TTS) + OpenRouter (LLM), with a mock PSA (SQLite), a sourced L1 knowledge base
-and a rules-based priority/escalation engine.
+Flask admin console and LiveKit voice agent for an MSP service desk. Zoho Desk is the only ticket system of record. SQLite stores the editable knowledge library, incidents, handoff/voicemail intake, routing settings, VIP routing flags, and audit events; it does not create or mirror tickets.
 
 ## Setup
-    python3 -m venv .venv && . .venv/bin/activate
-    pip install -r requirements.txt
-    cp .env.example .env     # fill in keys. Never commit .env
 
-## Try it without a phone number
-    python scripts/text_chat.py                      # chat in text (real LLM + tools, no mic needed)
-    python -m msp_agent.agent console                # voice via your terminal mic (run on your own machine)
-    python -m msp_agent.agent dev                    # voice from browser: https://agents-playground.livekit.io
-    python -m pytest tests                           # rules + ticketing tests
+1. Create a Zoho Desk OAuth Self Client and grant the scopes needed for tickets, contacts, agents, and departments. Set the Zoho organization and default ticket department.
+2. Create a Python environment and install dependencies:
 
-Seed callers (so identify_caller can recognize them): Priya Shah (VIP) and Tom Becker at Acme Dental;
-Maria Lopez and James Okoro at Northwind Logistics. Anyone else is treated as an unrecognized caller.
+       python3 -m venv .venv
+       . .venv/bin/activate
+       pip install -r requirements.txt
+       cp .env.example .env
 
-## Inspect the mock PSA
-    python -m msp_agent.cli list [--status open]
-    python -m msp_agent.cli show T-1001
-    python -m msp_agent.cli note T-1001 "called user back"
-    python -m msp_agent.cli status T-1001 in_progress --assignee alice
-    python -m msp_agent.cli incident-add "Print server down" printing     # new tickets in that category link to it
-    python -m msp_agent.cli escalations
-    python -m msp_agent.cli seed-demo                                    # 4 example tickets, LOCAL ONLY (add --zoho to also push them to Zoho Desk)
-    python -m msp_agent.cli create --name "Tom Becker" --company "Acme Dental" --category email --summary "Outlook down" --severity stopped
-Data lives in `data/msp.db` (gitignored; override with `MSP_DB`).
+3. Set the Zoho OAuth values plus a long `HELPDESK_ADMIN_PASSWORD` and persistent random `HELPDESK_SESSION_SECRET` in `.env`. Use the API and Accounts domains for the Zoho data center where the organization lives. Do not commit `.env`.
+4. Start the admin console:
 
-## Zoho Desk sync (optional)
-Fill the `ZOHO_*` lines in `.env` (see `.env.example`). When all are set, every ticket the agent or the CLI creates
-is also pushed to Zoho Desk: subject `[P#] summary`, priority P1/P2=High, P3=Medium, P4=Low, channel Phone, and the
-priority reasoning in the description. A repeat call adds a private comment to the same Zoho ticket instead of
-creating a duplicate. Sync is one-way and failures never interrupt a call (they are logged and stored in the
-ticket's `sync_error`). Check the connection (read-only): `python scripts/zoho_check.py`.
-Region matters: use your data center's domains (`.in`, `.eu`, `.com`). Tokens come from a Zoho API Console Self Client.
+       python -m msp_agent.web
 
-## How it decides (important)
-The LLM only reports **facts** (category, scope, severity, security/human/hostile flags). `escalation.py` decides
-priority and action, so behavior is testable and not left to the model.
-- Priority: impact x urgency matrix (P1 to P4), then overrides.
-- Security incident or data loss: always P1, immediate human. Caller is told to disconnect from the network but
-  not power off (CISA guidance).
-- Password / lockout / MFA: never done by the AI. Always a ticket for technician callback with identity verification.
-- VIP caller and repeat callers (3rd contact on the same open issue): bumped one level.
-- Printing and performance issues are capped (never P1 unless security).
-- Human requested or caller hostile: transfer in business hours, else callback next business day.
-- P1/P2: transfer in business hours, page on-call after hours.
-- Unrecognized caller: no ticket or account details shared.
-Config: `MSP_TZ` (default UTC), `MSP_HOURS` (default 08:00-18:00, Mon-Fri), `LIVE_TRANSFER_ENABLED` (default false).
+   Open <http://127.0.0.1:5000> and sign in with `HELPDESK_ADMIN_USER` (default `admin`) and the configured password. For deployment, run `gunicorn --bind 127.0.0.1:8000 msp_agent.web:app --workers 2` behind HTTPS, set `HELPDESK_COOKIE_SECURE=true`, and keep the service on a private network.
 
-## Caveats
-- SLA numbers in `escalation.py` are placeholder examples, not an ITIL standard. Use your contract terms.
-- KB content in `kb.py` is paraphrased from the cited Microsoft and CISA pages; review before production.
-  The MFA article is based on community Q&A; verify against your tenant's Entra documentation.
-- "Recognized" caller means a name/company match, **not** verified identity. Caller ID can be spoofed.
-- Live transfer, real SIP/phone, and real PSA integration are not built yet.
+## Admin console
+
+- **Ticket queue:** list and create tickets in Zoho Desk, open ticket conversations, update status, assign Zoho agents, and add private comments.
+- **Customers & agents:** view Zoho accounts and contacts, create accounts/contacts, see support agents, and set local VIP priority flags for contacts.
+- **Knowledge base:** manage sourced troubleshooting articles and safe steps, globally or scoped to an exact Zoho account. The agent uses local BM25-style ranked retrieval, only includes client-specific articles after an exact recognized contact match, and passes retrieved text into the LLM prompt. Pasted runbooks can be imported through the dashboard and are split into searchable chunks. This does not require an embedding service.
+- **Voicemail & handoffs:** capture a voicemail transcript or callback request, create a Zoho ticket, and track the internal follow-up queue. High priority/human requests created by the voice flow appear here.
+- **Known incidents, routing settings, and audit log:** maintain issue notices, business hours/time zone, after-hours routing preference, and a record of dashboard changes.
+
+## Voice agent
+
+Set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, and `OPENROUTER_API_KEY`. Then run:
+
+    python -m msp_agent.agent console
+
+The agent only reads issue facts, retrieves approved KB guidance, and submits tickets to Zoho Desk. The escalation rules compute priority and staff action. If Zoho is unavailable, a ticket is not represented as created; the call request is saved in the staff intake queue for recovery. Ticket details and modifications are withheld from callers until trusted identity verification is available.
+
+## Phone provider boundary
+
+The phone-provider connection is intentionally not included. The internal handoff and voicemail intake workflows are ready to receive provider events, but this repository does not answer SIP calls, record voicemail audio, or execute PSTN forwarding to a technician or voicemail box. Those actions require a provider adapter and its routing/credentials. Until connected, the agent reports a queued technician callback rather than claiming a live transfer occurred.
+
+## Ticket API and local data
+
+Zoho Desk OAuth credentials are required for all ticket operations. The existing `msp_agent.cli` is a small Zoho-backed helper; the Flask console is the staff interface. `MSP_DB` can point the operational SQLite data to a different file. Legacy local ticket tables from older database files are not read by the current service.
+
+Zoho Desk API supports read/write ticket operations and regional API domains; use the domain returned for your Zoho data center and the corresponding OAuth region. See the [official Zoho Desk API documentation](https://desk.zoho.com/DeskAPIDocument).
+
+## Operational limits
+
+- Current ticket and account/contact lists load the first 50 Zoho records; add pagination for larger queues.
+- SLA targets in `escalation.py` are example values. Set them to your customer contracts before use.
+- Knowledge articles are starter content. Review every article and source against your client environments before enabling caller guidance.
+- Contact matching uses exact name, phone, and Zoho account matches; this is not caller identity verification. Trusted caller-ID verification needs the phone provider.
+- Configure Zoho custom fields, departments, technician roles, and business policies in Zoho Desk to match your MSP.

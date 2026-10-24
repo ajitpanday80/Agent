@@ -1,4 +1,4 @@
-"""Priority and escalation rules. Pure functions, no I/O, so they are easy to test and tune.
+"""Priority and escalation rules. Settings may be supplied by the Flask console or environment.
 
 Priority = ITIL-style impact x urgency matrix, then overrides. The LLM only reports FACTS
 (scope, severity, flags); this module decides priority and action.
@@ -8,6 +8,8 @@ The SLA numbers are placeholder defaults modelled on one published example
 the targets in your own client contracts.
 """
 import os
+import sqlite3
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -38,8 +40,41 @@ SECURITY_INSTRUCTIONS = (
     "Do not discuss paying any ransom."
 )
 
-TRANSFER_ENABLED = os.getenv("LIVE_TRANSFER_ENABLED", "false").lower() == "true"
 
+def _runtime_setting(key: str, env_name: str, default: str) -> str:
+    """Prefer admin-console settings so voice workers share routing policy across processes."""
+    return _stored_settings((key,)).get(key, os.getenv(env_name, default))
+
+
+def _stored_settings(keys: tuple[str, ...]) -> dict[str, str]:
+    if not keys:
+        return {}
+    try:
+        from . import db
+        path = Path(os.getenv("MSP_DB") or db.DEFAULT_PATH)
+        if not path.exists():
+            return {}
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            marks = ",".join("?" for _ in keys)
+            return {r["key"]: r["value"] for r in conn.execute(
+                f"SELECT key,value FROM app_settings WHERE key IN ({marks})", keys)}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+
+
+def sla_for(priority: int) -> tuple[int, int]:
+    ack, resolve = SLA[priority]
+    rows = _stored_settings((f"p{priority}_ack", f"p{priority}_resolve"))
+    try:
+        ack = int(rows.get(f"p{priority}_ack", ack))
+        resolve = int(rows.get(f"p{priority}_resolve", resolve))
+    except ValueError:
+        return SLA[priority]
+    return ack, resolve
 
 @dataclass
 class Decision:
@@ -57,11 +92,11 @@ class Decision:
     def say_to_caller(self) -> str:
         eta = _fmt_minutes(self.ack_minutes)
         if self.action == "transfer_to_human":
-            if TRANSFER_ENABLED:
-                return "Tell the caller you are transferring them to a technician now."
-            return f"Tell the caller a technician will call them back, target within {eta}, and confirm their callback number."
+            return f"Tell the caller you have sent the request to the technician handoff queue, target response within {eta}."
         if self.action == "page_oncall":
-            return f"Tell the caller the on-call engineer has been alerted and will call back, target within {eta}."
+            return f"Tell the caller the request is marked urgent in the technician queue, with a target callback within {eta}."
+        if self.action == "voicemail":
+            return "Tell the caller you recorded the request for the helpdesk team to review."
         if self.action == "ticket_callback_verify":
             return ("Tell the caller a technician will call back to verify their identity before changing anything "
                     f"on their account, target within {eta}.")
@@ -71,9 +106,9 @@ class Decision:
 
 
 def in_business_hours(now: datetime | None = None) -> bool:
-    tz = ZoneInfo(os.getenv("MSP_TZ", "UTC"))
+    tz = ZoneInfo(_runtime_setting("timezone", "MSP_TZ", "UTC"))
     now = (now or datetime.now(tz)).astimezone(tz)
-    start, end = os.getenv("MSP_HOURS", "08:00-18:00").split("-")
+    start, end = _runtime_setting("hours", "MSP_HOURS", "08:00-18:00").split("-")
     if now.weekday() >= 5:
         return False
     return start <= now.strftime("%H:%M") < end
@@ -146,7 +181,12 @@ def decide(
 
     # Edit the rules below to change who gets paged. P1 and P2 are paged after hours here.
     if priority <= 2 or security:
-        action = "transfer_to_human" if in_hours else "page_oncall"
+        if in_hours:
+            action = "transfer_to_human"
+        elif not security and _runtime_setting("after_hours_mode", "MSP_AFTER_HOURS_MODE", "on_call") == "voicemail":
+            action = "voicemail"
+        else:
+            action = "page_oncall"
     elif wants_human:
         action = "transfer_to_human" if in_hours else "callback_next_business_day"
     elif requires_verification:
@@ -156,7 +196,7 @@ def decide(
     if requires_verification and action in ("ticket",):
         action = "ticket_callback_verify"
 
-    ack, resolve = SLA[priority]
+    ack, resolve = sla_for(priority)
     return Decision(
         priority=priority, impact=impact, urgency=urgency, action=action,
         requires_verification=requires_verification, security=security,
@@ -166,5 +206,5 @@ def decide(
 
 
 def due_times(priority: int, now: datetime) -> tuple[datetime, datetime]:
-    ack, resolve = SLA[priority]
+    ack, resolve = sla_for(priority)
     return now + timedelta(minutes=ack), now + timedelta(hours=resolve)
