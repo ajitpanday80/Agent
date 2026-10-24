@@ -242,12 +242,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         logger.error("session error: %s", ev.error)
 
     await session.start(room=ctx.room, agent=MspSupportAgent())
+    await ctx.connect()
 
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
         prewarm_fnc=prewarm,
+        agent_name=os.getenv("LIVEKIT_AGENT_NAME", "msp-helpdesk"),
         # Default is 10s, which a first start on a laptop can exceed (imports + model load).
         initialize_process_timeout=60,
         num_idle_processes=1,

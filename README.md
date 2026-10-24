@@ -35,9 +35,15 @@ Set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, 
 
 The agent only reads issue facts, retrieves approved KB guidance, and submits tickets to Zoho Desk. The escalation rules compute priority and staff action. If Zoho is unavailable, a ticket is not represented as created; the call request is saved in the staff intake queue for recovery. Ticket details and modifications are withheld from callers until trusted identity verification is available.
 
+For a single-command local setup, run `python scripts/dev.py` from the project root after installing dependencies and configuring `.env`. This starts both the Flask dashboard and LiveKit agent in development mode; open the LiveKit Cloud Agent Console separately to test the browser session. Press Ctrl+C to stop both processes.
+
+### Connect a LiveKit Phone Number
+
+The agent registers with the dispatch name in `LIVEKIT_AGENT_NAME` (default `msp-helpdesk`) and explicitly connects to each assigned room. In LiveKit Cloud, create an individual dispatch rule named `MSP Helpdesk Inbound`, add `msp-helpdesk` under the rule's agent/room configuration, save it, then open **Telephony → Phone Numbers** and assign that rule to your purchased number. A LiveKit-managed number does not need a separate inbound trunk. To test the number against your local worker using the default production dispatch, run `python scripts/dev.py --agent-mode start`; for a cloud deployment, deploy the agent to production instead. The default `dev` mode is for browser Agent Console testing. Test by calling the number from another phone. This routes the call to the AI agent; human transfers and voicemail audio capture still require separate call-flow implementation.
+
 ## Phone provider boundary
 
-The phone-provider connection is intentionally not included. The internal handoff and voicemail intake workflows are ready to receive provider events, but this repository does not answer SIP calls, record voicemail audio, or execute PSTN forwarding to a technician or voicemail box. Those actions require a provider adapter and its routing/credentials. Until connected, the agent reports a queued technician callback rather than claiming a live transfer occurred.
+Inbound calls through a LiveKit-managed phone number can be routed to the AI agent with the dispatch rule above. The application does not yet transfer an active call to a human, forward it to an external voicemail box, or record voicemail audio. Its escalation and after-hours actions currently create a Zoho ticket and staff handoff record; a human callback must be handled by staff.
 
 ## Ticket API and local data
 
