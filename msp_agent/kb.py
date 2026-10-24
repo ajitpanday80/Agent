@@ -1,109 +1,146 @@
-"""L1 knowledge base, loaded from markdown files in kb/ (one article per file).
-
-File format: a front-matter block between '---' lines (id, title, category, os, keywords, sources, drafted,
-reviewed, status), then '## Steps' (numbered, short, voice-friendly), '## Escalate if', and an optional
-'## Technician notes' section (command-line or risky fixes: NEVER walked through by phone; goes in the ticket).
-
-KB_REQUIRE_REVIEWED=true excludes articles whose status is not 'reviewed' (use in production after a human review).
-"""
-import os
+"""L1 knowledge base. Steps are paraphrased from the cited vendor/government pages and shortened for
+voice. Keep each step small enough to say out loud. Review against current docs before production use."""
 import re
 import json
 import math
 import sqlite3
 
-KB_DIR = Path(os.getenv("KB_DIR", Path(__file__).resolve().parent.parent / "kb"))
-OS_VALUES = ("windows", "mac", "any")
-STOPWORDS = {"a", "an", "the", "or", "and", "of", "to", "not", "cannot", "can", "will", "is", "my", "our", "we",
-             "in", "on", "it", "for", "with", "(windows)", "(mac)"}
+ARTICLES = [
+    {
+        "id": "outlook-loading-profile",
+        "title": "Outlook stuck on Loading Profile or not responding",
+        "category": "email",
+        "keywords": ["outlook", "loading profile", "not responding", "freezes", "hangs", "email", "mail", "won't open"],
+        "steps": [
+            "Close Outlook completely, then open it again. If it will not close, end Outlook in Task Manager.",
+            "Hold the Control key while opening Outlook, or run 'outlook.exe /safe'. This starts Outlook in safe mode, which turns off add-ins.",
+            "If safe mode works, an add-in is the likely cause. Create a ticket so a technician can find it. Do not remove add-ins by phone; disabling is safer than removing.",
+        ],
+        "escalate_if": "Still failing in safe mode, or the caller sees a data file or profile corruption message. A technician may need to repair the data file; do not walk the caller through repair tools.",
+        "sources": [
+            "https://support.microsoft.com/en-us/office/open-outlook-in-safe-mode-f394c2ee-b2af-e97a-64ee-35cd24414811",
+            "https://support.microsoft.com/en-us/outlook/getstarted/outlook-for-windows-not-responding-hangs-freezes-or-stops-working",
+        ],
+    },
+    {
+        "id": "printer-offline",
+        "title": "Printer shows offline or will not print",
+        "category": "printing",
+        "keywords": ["printer", "print", "printing", "offline", "paper jam", "queue", "spooler"],
+        "steps": [
+            "Check the printer is on, has no error or paper jam, and is on the same network as the computer.",
+            "Turn the printer off, unplug it for about thirty seconds, plug it back in and wait for it to be ready.",
+            "On the computer, open the print queue and make sure 'Pause printing' and 'Use printer offline' are not ticked, then cancel any stuck jobs.",
+            "Restart the computer and try one print.",
+        ],
+        "escalate_if": "Still offline after these steps, or several people cannot print (possible print server or network issue). Technician handles spooler service restart, re-adding the printer and drivers.",
+        "sources": [
+            "https://support.microsoft.com/en-us/windows/hardware/printer/troubleshooting-offline-printer-problems-in-windows",
+            "https://support.microsoft.com/en-us/windows/hardware/printer/fix-printer-connection-and-printing-problems-in-windows",
+        ],
+    },
+    {
+        "id": "slow-pc",
+        "title": "Computer running slowly",
+        "category": "performance",
+        "keywords": ["slow", "laggy", "lag", "sluggish", "performance", "takes forever", "freezing", "startup"],
+        "steps": [
+            "Save work, close programs and browser tabs that are not needed, and restart the computer.",
+            "If still slow, ask whether the drive is nearly full. Storage Sense in Settings under System, Storage can clear temporary files.",
+            "Ask whether it is slow at startup. Too many startup apps can cause that; a technician can review them.",
+        ],
+        "escalate_if": "Still slow after a restart, slow for several people, or any sign of malware such as pop-ups or unknown programs. Treat sudden slowness plus strange behavior as a possible security issue.",
+        "sources": [
+            "https://support.microsoft.com/en-us/windows/experience/performance-optimization/tips-to-improve-pc-performance-in-windows",
+        ],
+    },
+    {
+        "id": "vpn-cannot-connect",
+        "title": "VPN will not connect",
+        "category": "network_vpn",
+        "keywords": ["vpn", "remote access", "work from home", "error 720", "error 800", "error 809", "error 721", "error 812", "can't connect"],
+        "steps": [
+            "First ask for the exact error message or number, and whether regular internet works without the VPN.",
+            "Disconnect, close the VPN app fully, reopen it and try once more. Restart the computer if that fails.",
+            "Ask if they are on a hotel, cafe or other public network. Some networks block VPN traffic; trying a phone hotspot is a good test.",
+        ],
+        "escalate_if": "Same error after these steps, or several users cannot connect (possible firewall or VPN server issue). Error numbers help the technician: 720 usually means a local network adapter binding issue; 800 or 809 usually means the VPN server is unreachable or ports are blocked; 721 points to a blocked PPTP protocol; 812 or 13801 point to an authentication or certificate mismatch.",
+        "sources": [
+            "https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/error-when-establishing-vpn-connection",
+            "https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/troubleshoot-error-720-when-establishing-a-vpn-connection",
+        ],
+    },
+    {
+        "id": "password-or-lockout",
+        "title": "Forgot password or account locked out",
+        "category": "access",
+        "keywords": ["password", "locked out", "lockout", "account locked", "can't sign in", "cannot log in", "forgot", "reset password", "unlock"],
+        "steps": [
+            "Do NOT reset or unlock anything. Help-desk resets are a common social-engineering target.",
+            "If the company has self-service password reset turned on, the caller can use the 'Can't access your account' link on the sign-in page. Only mention this if you know their company uses it; otherwise do not promise it.",
+            "Create an access ticket. A technician will call back and verify identity before any change.",
+        ],
+        "escalate_if": "Always a ticket for a technician. Raise priority if the caller is a VIP or work is fully stopped; priority is set by the system.",
+        "sources": [
+            "https://learn.microsoft.com/training/modules/allow-users-reset-their-password/2-self-service-password-reset",
+            "https://specopssoft.com/blog/helpdesk-password-reset-best-practices/",
+        ],
+    },
+    {
+        "id": "lost-phone-mfa",
+        "title": "Lost or replaced phone, cannot approve sign-in (MFA)",
+        "category": "access",
+        "keywords": ["mfa", "authenticator", "lost phone", "new phone", "two factor", "2fa", "verification code", "approve sign-in", "stolen phone"],
+        "steps": [
+            "Do NOT reset MFA. This is a high-risk request for impersonation.",
+            "Ask if they can sign in with another method they registered before, such as a text or call. If so, they can add the new phone at their security info page.",
+            "Otherwise create an access ticket. A technician must verify identity, then an administrator can have the user re-register or issue a temporary access pass.",
+            "If the phone was stolen, tell the caller a technician will treat this as a security matter.",
+        ],
+        "escalate_if": "Stolen phone means treat as a security incident. Any attempt to bypass verification is a reason to escalate.",
+        "sources": [
+            "https://learn.microsoft.com/en-us/answers/questions/5428281/cant-access-my-microsoft-account-because-i-lost-my",
+        ],
+        "notes": "Source is a community Q&A thread; confirm the admin procedure against Microsoft Entra documentation for your tenant.",
+    },
+    {
+        "id": "ransomware-phishing",
+        "title": "Suspected ransomware, malware, or phishing click",
+        "category": "security",
+        "keywords": ["ransomware", "ransom", "encrypted", "files locked", "virus", "malware", "phishing", "clicked a link", "hacked", "suspicious", "compromised", "bitcoin"],
+        "steps": [
+            "Stay calm and stay on the line. This is a priority one security incident and a human technician must be involved.",
+            "Ask the caller to disconnect the affected computer from the network by unplugging the cable or turning off Wi-Fi. Do not power it off, because that can destroy evidence.",
+            "Ask them not to delete files, not to click or forward anything suspicious, and not to pay or reply to any ransom demand.",
+            "Collect: which computers, what they saw, what time it started, and whether they entered a password.",
+        ],
+        "escalate_if": "Always. Immediate human escalation.",
+        "sources": [
+            "https://www.cisa.gov/stopransomware/ive-been-hit-ransomware",
+        ],
+    },
+]
 
 
-def _parse(path: Path) -> dict:
-    text = path.read_text()
-    m = re.match(r"---\n(.*?)\n---\n(.*)", text, re.S)
-    if not m:
-        raise ValueError(f"{path.name}: missing front matter")
-    meta: dict = {"sources": []}
-    current = None
-    for line in m.group(1).splitlines():
-        if line.startswith("  - ") and current == "sources":
-            meta["sources"].append(line[4:].strip())
-        elif ":" in line and not line.startswith(" "):
-            k, v = line.split(":", 1)
-            current = k.strip()
-            if current != "sources":      # 'sources:' is followed by a '  - url' list
-                meta[current] = v.strip()
-    sections: dict[str, str] = {}
-    name = None
-    for line in m.group(2).splitlines():
-        if line.startswith("## "):
-            name = line[3:].strip().lower()
-            sections[name] = ""
-        elif name:
-            sections[name] += line + "\n"
-    steps = [re.sub(r"^\d+\.\s*", "", ln).strip() for ln in sections.get("steps", "").splitlines() if ln.strip()]
-    art = {
-        "id": meta["id"], "title": meta["title"], "category": meta["category"], "os": meta.get("os", "any"),
-        "keywords": [k.strip().lower() for k in meta.get("keywords", "").split(",") if k.strip()],
-        "sources": meta["sources"], "status": meta.get("status", "draft"), "reviewed": meta.get("reviewed", "never"),
-        "drafted": meta.get("drafted", ""), "steps": steps,
-        "escalate_if": sections.get("escalate if", "").strip(),
-        "notes": sections.get("technician notes", "").strip(),
-    }
-    if art["os"] not in OS_VALUES:
-        raise ValueError(f"{path.name}: os must be one of {OS_VALUES}")
-    if not art["steps"] or not art["keywords"] or not art["sources"]:
-        raise ValueError(f"{path.name}: steps, keywords and sources are required")
-    return art
-
-
-def load() -> list[dict]:
-    arts = [_parse(p) for p in sorted(KB_DIR.glob("*.md"))]
-    ids = [a["id"] for a in arts]
-    if len(ids) != len(set(ids)):
-        raise ValueError("duplicate article ids in kb/")
-    return arts
-
-
-ARTICLES = load()
-
-
-def _stem(w: str) -> str:
-    """Very light stemmer so 'receiving'/'receive', 'deleted'/'delete', 'prints'/'print' match."""
-    for suf in ("ing", "ed", "es", "s", "e"):
-        if w.endswith(suf) and len(w) - len(suf) >= 4:
-            return w[: -len(suf)]
-    return w
+STOPWORDS = {"a", "an", "the", "or", "and", "of", "to", "not", "cannot", "can", "will", "is", "my", "our", "we", "in", "on", "it"}
 
 
 def _tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9']+", text.lower()))
 
 
-def _stems(text: str) -> set[str]:
-    return {_stem(t) for t in _tokens(text)}
-
-
-def search(query: str, limit: int = 2, operating_system: str | None = None) -> list[dict]:
-    """Keyword search. A keyword hit is required; title overlap only breaks ties.
-    operating_system 'windows' or 'mac' keeps only matching and OS-neutral articles."""
+def search(query: str, limit: int = 2) -> list[dict]:
     q = query.lower()
     qt = _tokens(q)
-    qs = _stems(q)
-    require_reviewed = os.getenv("KB_REQUIRE_REVIEWED", "false").lower() == "true"
     scored = []
     for a in ARTICLES:
-        if require_reviewed and a["status"] != "reviewed":
-            continue
-        if operating_system in ("windows", "mac") and a["os"] not in (operating_system, "any"):
-            continue
         score = 0
         for k in a["keywords"]:
-            if " " in k or "'" in k or "-" in k:
+            if " " in k or "'" in k:
                 score += 3 if k in q else 0
-            elif k in qt or _stem(k) in qs:
+            elif k in qt:
                 score += 2
-        if score:
+        if score:  # a keyword hit is required; title overlap only breaks ties
             score += len(qt & _tokens(a["title"]) - STOPWORDS)
             scored.append((score, a))
     scored.sort(key=lambda s: -s[0])

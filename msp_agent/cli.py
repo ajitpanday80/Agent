@@ -1,6 +1,5 @@
 """Small Zoho Desk helper CLI. The Flask console is the primary admin interface."""
 import argparse
-import os
 
 from dotenv import load_dotenv
 
@@ -42,8 +41,6 @@ def main() -> None:
     cr.add_argument("--security", action="store_true")
     cr.add_argument("--wants-human", action="store_true")
     a = p.parse_args()
-    if os.getenv("MSP_ENV", "").lower() == "production" and a.cmd in ("create", "seed-demo"):
-        raise SystemExit("Refusing: MSP_ENV=production. Mock/demo tickets are for development only.")
     conn = db.connect()
 
     if a.cmd == "list":

@@ -1,0 +1,10 @@
+#!/bin/sh
+
+branch=$(git symbolic-ref --quiet --short HEAD) || {
+    echo "Auto-push skipped: detached HEAD." >&2
+    exit 0
+}
+remote=$(git config --get "branch.$branch.remote")
+[ -n "$remote" ] || remote=origin
+echo "Auto-pushing committed branch $branch to $remote..."
+git push "$remote" "HEAD:refs/heads/$branch"

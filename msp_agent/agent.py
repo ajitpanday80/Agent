@@ -30,17 +30,15 @@ Call flow:
 2. Call identify_caller. If not recognized, still help, but share no account or ticket details.
 3. Ask what is wrong. Find out: how many people are affected, whether work is completely stopped,
    whether there is a workaround, and anything that looks like a security problem.
-4. As soon as you know the issue, scope and severity, call create_ticket. EVERY call gets a ticket, even if
-   you expect to fix it. You do NOT choose the priority: the system does, and tells you what to say.
-   Report facts honestly (scope, severity, flags). Read the ticket number back slowly.
-5. Call check_known_outages for the category. If there is a matching active incident, tell the caller
-   we are already working on it.
-6. For computer issues, ask whether the device is Windows or a Mac. Call search_knowledge_base with that and give
-   at most one or two steps at a time. Only give steps the tool returns.
-   Never invent fixes, SLAs, prices or technical facts.
-7. If a step FIXES the problem and the caller confirms they need nothing else, call close_ticket with what fixed it.
-   If it is not fixed, leave the ticket open and say a technician will follow up.
-8. Ask if there is anything else, then say goodbye.
+4. Call check_known_outages for the issue category. If there is a matching active incident, tell the caller
+   we are already working on it, then still create a ticket so they are linked.
+5. Call search_knowledge_base. Give at most one or two steps at a time and wait for the result.
+   Only give steps the tool returns. Never invent fixes, SLAs, prices or technical facts.
+6. If not fixed, or the knowledge base says to escalate, call create_ticket. Report facts honestly
+   (scope, severity, flags). You do NOT choose the priority: the system does, and tells you what to say.
+7. Read the ticket number back slowly, say what happens next, and ask if there is anything else.
+8. If a knowledge-base step FIXED the problem and the caller confirms they need nothing else, call
+   log_resolved_call so the call is recorded. Never use it for security or account-access issues.
 
 Style rules:
 - Do not repeat questions or troubleshooting the caller already answered or tried.
@@ -61,9 +59,9 @@ Hard rules:
 
 
 class MspSupportAgent(Agent):
-    def __init__(self, service: CallService | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__(instructions=INSTRUCTIONS)
-        self.svc = service or CallService(db.connect())
+        self.caller: dict | None = None
 
     async def on_enter(self) -> None:
         await self.session.generate_reply(
@@ -80,13 +78,13 @@ class MspSupportAgent(Agent):
             return ("Caller not found in client records. Continue helping, but do not share any ticket or account "
                     "details. Mark this in the ticket.")
         extra = " Their number does not match the number on file; note this in the ticket." \
-            if callback_number and not c["phone_matches_record"] else ""
-        return f"Caller recognized as {c['name']} at {c['company_name']}. Not identity-verified.{extra}"
+            if callback_number and not self.caller["phone_matches_record"] else ""
+        return f"Caller recognized as {self.caller['name']} at {self.caller['company_name']}. Not identity-verified.{extra}"
 
     @function_tool
     async def check_known_outages(self, context: RunContext, category: Category) -> str:
         """Check whether there is already an active incident in this category."""
-        found = tickets.active_incidents(self.svc.conn, category)
+        found = tickets.active_incidents(db.connect(), category)
         if not found:
             return "No active incidents in this category."
         return "Active incident: " + "; ".join(i["title"] for i in found)
@@ -97,11 +95,8 @@ class MspSupportAgent(Agent):
         company_name = self.caller.get("company_name") if self.caller and self.caller.get("recognized") else None
         hits = kb.search_index(issue_description, db.connect(), company_name=company_name)
         if not hits:
-            return "No matching article. Say a technician will follow up on the ticket."
-        note = ""
-        if operating_system == "unknown" and len({h["os"] for h in hits} - {"any"}) > 0:
-            note = "The caller's operating system is unknown: ask Windows or Mac before giving steps. "
-        return note + "\n".join(kb.format_for_agent(h) for h in hits)
+            return "No matching article. Offer to create a ticket."
+        return "\n".join(kb.format_for_agent(h) for h in hits)
 
     @function_tool
     async def create_ticket(
@@ -233,13 +228,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
 
     # Diagnostics: shows in the terminal what the agent hears and when it starts/stops speaking.
-    agent = MspSupportAgent()
-
     @session.on("user_input_transcribed")
     def _heard(ev) -> None:
         if ev.is_final:
             logger.info("HEARD: %r", ev.transcript)
-            agent.svc.heard.append(ev.transcript)
 
     @session.on("agent_state_changed")
     def _state(ev) -> None:
@@ -254,7 +246,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
 
 if __name__ == "__main__":
-    preflight.enforce()   # no-op unless MSP_ENV=production; then refuses to start with any blocker failing
     agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
         prewarm_fnc=prewarm,

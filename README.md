@@ -27,6 +27,10 @@ Flask admin console and LiveKit voice agent for an MSP service desk. Zoho Desk i
 - **Voicemail & handoffs:** capture a voicemail transcript or callback request, create a Zoho ticket, and track the internal follow-up queue. High priority/human requests created by the voice flow appear here.
 - **Known incidents, routing settings, and audit log:** maintain issue notices, business hours/time zone, after-hours routing preference, and a record of dashboard changes.
 
+The Markdown articles in `kb/` are sourced drafts for staff review; they are not automatically activated. Review them against the client environment, then import approved content through the dashboard's Knowledge Base page.
+
+This checkout auto-pushes each Git commit to its same-named branch on `origin`. On a fresh clone, enable the tracked hook with `git config core.hooksPath .githooks`. File edits are pushed after they are committed.
+
 ## Voice agent
 
 Set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, and `OPENROUTER_API_KEY`. Then run:
