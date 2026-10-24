@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">RelayDesk</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5578cb"/>
+      <stop offset="1" stop-color="#274a96"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="url(#bg)"/>
+  <path d="M18 32h10c7 0 7-12 16-12h3M28 32c7 0 7 12 16 12h3" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="4"/>
+  <circle cx="17" cy="32" r="5" fill="#fff"/>
+  <circle cx="48" cy="20" r="5" fill="#9de3d1"/>
+  <circle cx="48" cy="44" r="5" fill="#9de3d1"/>
+</svg>

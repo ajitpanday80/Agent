@@ -1,6 +1,6 @@
-# MSP Helpdesk
+# RelayDesk
 
-Flask admin console and LiveKit voice agent for an MSP service desk. Zoho Desk is the only ticket system of record. SQLite stores the editable knowledge library, incidents, handoff/voicemail intake, routing settings, VIP routing flags, and audit events; it does not create or mirror tickets.
+RelayDesk is a Flask admin console and LiveKit voice agent for MSP service operations. Zoho Desk is the only ticket system of record. SQLite stores the editable knowledge library, incidents, handoff/voicemail intake, routing settings, VIP routing flags, and audit events; it does not create or mirror tickets.
 
 ## Setup
 
