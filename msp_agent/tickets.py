@@ -161,8 +161,13 @@ def create(
             else:
                 d.action = "page_oncall"
         clean_subject = re.sub(r"^(?:\[P[1-4]\]\s*)+", "", str(existing.get("subject", "")), flags=re.IGNORECASE)
-        zoho.update_ticket(old["id"], {"priority": zoho.PRIORITY_MAP[d.priority],
-                                        "subject": f"[P{d.priority}] {clean_subject}"})
+        update = {"priority": zoho.PRIORITY_MAP[d.priority],
+                  "subject": f"[P{d.priority}] {clean_subject}"}
+        if not (existing.get("assigneeId") or (existing.get("assignee") or {}).get("id")):
+            agent = zoho.least_loaded_agent(zoho._department_id())
+            if agent:
+                update["assigneeId"] = str(agent["id"])
+        zoho.update_ticket(old["id"], update)
         zoho.add_comment(old["id"], "Repeat call logged by the MSP voice agent.\n" + zoho._description(pseudo, d),
                          public=False)
         count = prior + 1
@@ -178,6 +183,9 @@ def create(
         "contact": zoho._contact(pseudo, None), "description": zoho._description(pseudo, d),
         "priority": zoho.PRIORITY_MAP[d.priority], "channel": "Phone", "status": "Open",
     }
+    agent = zoho.least_loaded_agent(zoho._department_id())
+    if agent:
+        payload["assigneeId"] = str(agent["id"])
     if caller.get("contact_id"):
         payload.pop("contact", None)
         payload["contactId"] = str(caller["contact_id"])
@@ -306,6 +314,8 @@ def _from_zoho(row: dict) -> dict:
             "company_id": row.get("accountId"), "contact_id": row.get("contactId"),
             "callback_number": contact.get("phone", "") or (caller_match.group(3) if caller_match else ""),
             "summary": subject, "details": description,
-            "assignee": assignee.get("name") or assignee.get("email"),
+            "assignee": assignee.get("name") or " ".join(
+                part for part in (assignee.get("firstName"), assignee.get("lastName")) if part
+            ) or assignee.get("email") or assignee.get("emailId"),
             "ack_due": row.get("dueDate", ""), "action": action_match.group(1) if action_match else "ticket",
             "notes": []}

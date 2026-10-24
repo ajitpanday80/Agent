@@ -4,6 +4,7 @@ Auth: Zoho OAuth "Self Client" refresh token -> short-lived access token (cached
 API docs: https://desk.zoho.com/DeskAPIDocument  (use your data center's domain, e.g. desk.zoho.in)
 """
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -15,6 +16,7 @@ PRIORITY_MAP = {1: "High", 2: "High", 3: "Medium", 4: "Low"}
 ZOHO_STATUS = {"open": "Open", "in_progress": "Open", "waiting_on_customer": "On Hold", "resolved": "Closed",
                "closed": "Closed"}
 _token = {"value": None, "expires": 0.0}
+logger = logging.getLogger(__name__)
 
 
 def _cfg(name: str) -> str:
@@ -85,12 +87,58 @@ def request(method: str, path: str, body: dict | None = None, params: dict | Non
 
 def list_tickets(*, offset: int = 1, limit: int = 50) -> list[dict]:
     resp = request("GET", "/tickets", params={"from": offset, "limit": min(max(limit, 1), 50),
-                                                "sortBy": "-modifiedTime"})
+                                                "sortBy": "-modifiedTime", "include": "assignee"})
     return resp.get("data", [])
 
 
-def list_agents(*, offset: int = 1, limit: int = 50) -> list[dict]:
-    return request("GET", "/agents", params={"from": offset, "limit": min(max(limit, 1), 50)}).get("data", [])
+def list_agents(*, offset: int = 0, limit: int = 200, department_id: str = "") -> list[dict]:
+    params = {"from": offset, "limit": min(max(limit, 1), 200), "status": "ACTIVE"}
+    if department_id:
+        params["departmentIds"] = department_id
+    return request("GET", "/agents", params=params).get("data", [])
+
+
+def least_loaded_agent(department_id: str = "") -> dict | None:
+    """Return an active department agent with the fewest active tickets assigned in Zoho."""
+    try:
+        agents = [a for a in list_agents(department_id=department_id)
+                  if a.get("id") and a.get("isActive", True)]
+    except Exception as error:
+        logger.warning("Could not list Zoho agents for ticket assignment: %s", type(error).__name__)
+        return None
+    if not agents:
+        return None
+    if len(agents) == 1:
+        return agents[0]
+
+    workloads = {str(agent["id"]): 0 for agent in agents}
+    statuses = ("Open", "On Hold", "Escalated")
+    try:
+        for agent in agents:
+            agent_id = str(agent["id"])
+            for status in statuses:
+                result = request("GET", "/tickets/search", params={
+                    "assignee": agent_id, "status": status, "from": 0, "limit": 1,
+                    **({"departmentId": department_id} if department_id else {}),
+                })
+                workloads[agent_id] += int(result.get("count", len(result.get("data", []))))
+    except Exception as error:
+        # Keep ticket creation available when search scope/API access is unavailable. Count the
+        # latest Zoho tickets as a fallback, and choose the first active agent if even that fails.
+        logger.warning("Could not calculate Zoho agent workload: %s", type(error).__name__)
+        workloads = {str(agent["id"]): 0 for agent in agents}
+        try:
+            for ticket in list_tickets():
+                status = str(ticket.get("status") or ticket.get("statusType") or "").lower()
+                if status in ("open", "on hold", "escalated"):
+                    owner = ticket.get("assignee") or {}
+                    owner_id = str(ticket.get("assigneeId") or owner.get("id") or "")
+                    if owner_id in workloads:
+                        workloads[owner_id] += 1
+        except Exception as fallback_error:
+            logger.warning("Zoho workload fallback failed: %s", type(fallback_error).__name__)
+    return min(agents, key=lambda a: (workloads[str(a["id"])],
+                                      str(a.get("name") or a.get("email") or a["id"]).lower()))
 
 
 def list_contacts(*, offset: int = 0, limit: int = 50) -> list[dict]:
