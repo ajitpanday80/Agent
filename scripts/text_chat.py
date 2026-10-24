@@ -30,7 +30,8 @@ async def main(lines: list[str]) -> None:
     llm = openai.LLM(model=os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5"),
                      base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"])
     async with AgentSession(llm=llm) as session:
-        await session.start(MspSupportAgent())
+        agent = MspSupportAgent()
+        await session.start(agent)
         interactive = not lines
         while True:
             if interactive:
@@ -43,7 +44,9 @@ async def main(lines: list[str]) -> None:
                 print(f"YOU: {line}")
             else:
                 break
+            agent.svc.heard.append(line)
             show(await session.run(user_input=line))
+        await asyncio.to_thread(agent.svc.end_call)   # same hook the live agent runs on hang-up
 
 
 if __name__ == "__main__":

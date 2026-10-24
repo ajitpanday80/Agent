@@ -15,7 +15,26 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 # priority -> (acknowledge within minutes, resolve within hours; calendar hours for simplicity)
-SLA = {1: (10, 4), 2: (15, 8), 3: (60, 48), 4: (240, 120)}
+DEFAULT_SLA = {1: (10, 4), 2: (15, 8), 3: (60, 48), 4: (240, 120)}
+
+
+def _sla_from_env() -> dict[int, tuple[int, int]] | None:
+    """MSP_SLA="1:10/4,2:15/8,3:60/48,4:240/120"  (priority:ack_minutes/resolve_hours)."""
+    raw = os.getenv("MSP_SLA", "").strip()
+    if not raw:
+        return None
+    out = {}
+    for part in raw.split(","):
+        pr, rest = part.split(":")
+        ack, res = rest.split("/")
+        out[int(pr)] = (int(ack), int(res))
+    if sorted(out) != [1, 2, 3, 4]:
+        raise ValueError("MSP_SLA must define priorities 1, 2, 3 and 4")
+    return out
+
+
+SLA = _sla_from_env() or DEFAULT_SLA
+SLA_IS_DEFAULT = _sla_from_env() is None
 
 # (impact, urgency) -> priority. 1 = highest.
 MATRIX = {
