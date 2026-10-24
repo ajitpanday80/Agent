@@ -122,7 +122,9 @@ def create(
         else:
             d.reasons.append(f"retained the existing ticket priority P{previous_priority}")
         d.ack_minutes, d.resolve_hours = escalation.sla_for(d.priority)
-        if d.priority <= 2:
+        if caller_requests_human:
+            d.action = "transfer_to_human"
+        elif d.priority <= 2:
             if escalation.in_business_hours(now):
                 d.action = "transfer_to_human"
             elif not d.security and escalation._runtime_setting("after_hours_mode", "MSP_AFTER_HOURS_MODE", "on_call") == "voicemail":

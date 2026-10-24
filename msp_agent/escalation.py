@@ -106,11 +106,11 @@ class Decision:
 
     def say_to_caller(self) -> str:
         if self.action == "transfer_to_human":
-            return "Tell the caller the ticket is in the staff follow-up queue. A live transfer is not available on this line."
+            return "Tell the caller the ticket is in the staff queue and a live transfer will be attempted."
         if self.action == "page_oncall":
             return "Tell the caller the ticket is marked urgent for staff follow-up. Do not promise a callback time."
         if self.action == "voicemail":
-            return "Tell the caller the request is in the helpdesk intake queue. No voicemail recording was made."
+            return "Tell the caller the ticket is logged and the call will be forwarded to the configured voicemail destination."
         if self.action == "ticket_callback_verify":
             return "Tell the caller staff follow-up is required to verify their identity before any account change. Do not promise a callback time."
         if self.action == "callback_next_business_day":
@@ -191,7 +191,10 @@ def decide(
         reasons.append("caller is distressed or hostile")
 
     # Edit the rules below to change who gets paged. P1 and P2 are paged after hours here.
-    if priority <= 2 or security:
+    if caller_requests_human:
+        reasons.append("caller explicitly requested a human transfer")
+        action = "transfer_to_human"
+    elif priority <= 2 or security:
         if in_hours:
             action = "transfer_to_human"
         elif not security and _runtime_setting("after_hours_mode", "MSP_AFTER_HOURS_MODE", "on_call") == "voicemail":

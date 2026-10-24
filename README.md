@@ -24,7 +24,7 @@ Flask admin console and LiveKit voice agent for an MSP service desk. Zoho Desk i
 - **Ticket queue:** list and create tickets in Zoho Desk, open ticket conversations, update status, assign Zoho agents, and add private comments.
 - **Customers & agents:** view Zoho accounts and contacts, create accounts/contacts, see support agents, and set local VIP priority flags for contacts.
 - **Knowledge base:** manage sourced troubleshooting articles and safe steps, globally or scoped to an exact Zoho account. The agent uses local BM25-style ranked retrieval, only includes client-specific articles after an exact recognized contact match, and passes retrieved text into the LLM prompt. Pasted runbooks can be imported through the dashboard and are split into searchable chunks. This does not require an embedding service.
-- **Voicemail & handoffs:** capture a voicemail transcript or callback request, create a Zoho ticket, and track the internal follow-up queue. High priority/human requests created by the voice flow appear here.
+- **Voicemail & handoffs:** track staff follow-up, caller requested transfers, and caller-authorized voicemail transcripts alongside Zoho tickets.
 - **Known incidents, routing settings, and audit log:** maintain issue notices, business hours/time zone, after-hours routing preference, and a record of dashboard changes.
 
 The Markdown articles in `kb/` are sourced drafts for staff review; they are not automatically activated. Review them against the client environment, then import approved content through the dashboard's Knowledge Base page.
@@ -43,11 +43,13 @@ For a single-command local setup, run `python scripts/dev.py` from the project r
 
 ### Connect a LiveKit Phone Number
 
-The agent registers with the dispatch name in `LIVEKIT_AGENT_NAME` (default `msp-helpdesk`) and explicitly connects to each assigned room. In LiveKit Cloud, create an individual dispatch rule named `MSP Helpdesk Inbound`, add `msp-helpdesk` under the rule's agent/room configuration, save it, then open **Telephony → Phone Numbers** and assign that rule to your purchased number. A LiveKit-managed number does not need a separate inbound trunk. To test the number against your local worker using the default production dispatch, run `python scripts/dev.py --agent-mode start`; for a cloud deployment, deploy the agent to production instead. The default `dev` mode is for browser Agent Console testing. Test by calling the number from another phone. This routes the call to the AI agent; human transfers and voicemail audio capture still require separate call-flow implementation.
+The agent registers with the dispatch name in `LIVEKIT_AGENT_NAME` (default `msp-helpdesk`) and explicitly connects to each assigned room. In LiveKit Cloud, create an individual dispatch rule named `MSP Helpdesk Inbound`, add `msp-helpdesk` under the rule's agent/room configuration, save it, then open **Telephony → Phone Numbers** and assign that rule to your purchased number. A LiveKit-managed number does not need a separate inbound trunk. To test the number against your local worker using the default production dispatch, run `python scripts/dev.py --agent-mode start`; for a cloud deployment, deploy the agent to production instead. The default `dev` mode is for browser Agent Console testing. Test by calling the number from another phone.
 
-## Phone provider boundary
+## Human transfer and voicemail
 
-Inbound calls through a LiveKit-managed phone number can be routed to the AI agent with the dispatch rule above. The application does not yet transfer an active call to a human, forward it to an external voicemail box, or record voicemail audio. Its escalation and after-hours actions currently create a Zoho ticket and staff handoff record; a human callback must be handled by staff.
+In the admin dashboard, open **Routing & system** and set **Human agent destination** and **Voicemail destination** using E.164 numbers (for example `+61255550123`) or SIP URIs. For urgent P1/P2 calls outside the coverage policy, select **Voicemail transfer destination** if those calls should be forwarded; select **Staff follow-up queue** to leave them for staff instead. A caller asking for a human is transferred to the human destination regardless of business hours. A caller asking to leave voicemail is routed to the voicemail destination.
+
+Transfers use LiveKit's `TransferSIPParticipant` SIP REFER operation. The account's API credentials must permit SIP call control, and the LiveKit/provider SIP trunk must accept REFER and allow transfers to the configured destination. Confirm provider support and place real test calls before relying on this route. If a transfer fails, the caller stays with the agent; the request remains in Zoho Desk and the staff handoff queue. For voicemail fallback, the agent can capture a caller-authorized speech transcript and add it as a private Zoho comment. This does not create an audio recording; real voicemail audio is handled by the configured voicemail system.
 
 ## Ticket API and local data
 
