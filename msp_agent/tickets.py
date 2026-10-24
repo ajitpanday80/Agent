@@ -269,9 +269,10 @@ def get(conn: sqlite3.Connection, ticket_id: int) -> dict | None:
         return None
 
 
-def list_tickets(conn: sqlite3.Connection, status: str | None = None) -> list[dict]:
+def list_tickets(conn: sqlite3.Connection, status: str | None = None,
+                 offset: int = 1, limit: int = 50) -> list[dict]:
     from . import zoho
-    rows = [_from_zoho(r) for r in zoho.list_tickets()]
+    rows = [_from_zoho(r) for r in zoho.list_tickets(offset=offset, limit=limit)]
     if status:
         rows = [r for r in rows if r["status"] == status]
     return rows

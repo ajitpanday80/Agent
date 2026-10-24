@@ -8,24 +8,33 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from dotenv import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the helpdesk dashboard and LiveKit agent.")
-    parser.add_argument("--agent-mode", choices=("dev", "start"), default="dev",
-                        help="Use dev for browser testing or start for production-dispatch phone testing.")
+    parser.add_argument("--agent-mode", choices=("dev", "start"),
+                        help="Use dev for browser testing or start for production-dispatch phone testing. "
+                             "If not specified, uses LIVEKIT_AGENT_MODE from .env (default: dev).")
     args = parser.parse_args()
+
+    # Use command-line arg if provided, otherwise fall back to .env, default to "dev"
+    agent_mode = args.agent_mode or os.getenv("LIVEKIT_AGENT_MODE", "dev")
+    if agent_mode not in ("dev", "start"):
+        agent_mode = "dev"
+
     env = os.environ.copy()
     children = [
         subprocess.Popen([sys.executable, "-m", "msp_agent.web"], cwd=ROOT, env=env),
-        subprocess.Popen([sys.executable, "-m", "msp_agent.agent", args.agent_mode], cwd=ROOT, env=env),
+        subprocess.Popen([sys.executable, "-m", "msp_agent.agent", agent_mode], cwd=ROOT, env=env),
     ]
     print("Dashboard: http://127.0.0.1:5000", flush=True)
-    print(f"LiveKit agent '{os.getenv('LIVEKIT_AGENT_NAME', 'msp-helpdesk')}' starting in {args.agent_mode} mode.", flush=True)
-    if args.agent_mode == "dev":
+    print(f"LiveKit agent '{os.getenv('LIVEKIT_AGENT_NAME', 'msp-helpdesk')}' starting in {agent_mode} mode.", flush=True)
+    if agent_mode == "dev":
         print("Open your project's Agent Console in LiveKit Cloud to connect.", flush=True)
     else:
         print("Agent is registering in the production deployment for LiveKit dispatch rules.", flush=True)

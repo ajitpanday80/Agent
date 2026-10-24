@@ -473,8 +473,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         tts=deepgram.TTS(model="aura-2-thalia-en"),
         vad=ctx.proc.userdata["vad"],
         turn_handling={
-            # Defaults treat any 0.5s of sound (cough, noise, speaker echo) as the caller interrupting.
-            "interruption": {"min_duration": 0.8, "min_words": 2},
+            # Reduced interruption sensitivity to lower LiveKit adaptive interruption API usage
+            # min_duration: require longer speech before treating it as an interruption (1.2s vs 0.8s)
+            # min_words: require more words before interrupting (3 vs 2)
+            # This prevents accidental interruptions from background noise, coughs, or brief utterances
+            "interruption": {"min_duration": 1.2, "min_words": 3},
         },
     )
 

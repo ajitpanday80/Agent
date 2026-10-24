@@ -86,7 +86,7 @@ def request(method: str, path: str, body: dict | None = None, params: dict | Non
 
 
 def list_tickets(*, offset: int = 1, limit: int = 50) -> list[dict]:
-    resp = request("GET", "/tickets", params={"from": offset, "limit": min(max(limit, 1), 50),
+    resp = request("GET", "/tickets", params={"from": max(offset, 1), "limit": min(max(limit, 1), 50),
                                                 "sortBy": "-modifiedTime", "include": "assignee"})
     return resp.get("data", [])
 
@@ -98,10 +98,21 @@ def list_agents(*, offset: int = 0, limit: int = 200, department_id: str = "") -
     return request("GET", "/agents", params=params).get("data", [])
 
 
+def list_all_agents(*, department_id: str = "") -> list[dict]:
+    """Page through the full active-agent directory (Zoho supports up to 200 agents per request)."""
+    agents = []
+    for offset in range(0, 100_000, 200):
+        batch = list_agents(offset=offset, limit=200, department_id=department_id)
+        agents.extend(batch)
+        if len(batch) < 200:
+            break
+    return agents
+
+
 def least_loaded_agent(department_id: str = "") -> dict | None:
     """Return an active department agent with the fewest active tickets assigned in Zoho."""
     try:
-        agents = [a for a in list_agents(department_id=department_id)
+        agents = [a for a in list_all_agents(department_id=department_id)
                   if a.get("id") and a.get("isActive", True)]
     except Exception as error:
         logger.warning("Could not list Zoho agents for ticket assignment: %s", type(error).__name__)
@@ -142,12 +153,24 @@ def least_loaded_agent(department_id: str = "") -> dict | None:
 
 
 def list_contacts(*, offset: int = 0, limit: int = 50) -> list[dict]:
-    return request("GET", "/contacts", params={"from": offset, "limit": min(max(limit, 1), 50),
+    return request("GET", "/contacts", params={"from": max(offset, 0), "limit": min(max(limit, 1), 50),
                                                   "include": "accounts"}).get("data", [])
 
 
 def list_accounts(*, offset: int = 0, limit: int = 50) -> list[dict]:
-    return request("GET", "/accounts", params={"from": offset, "limit": min(max(limit, 1), 50)}).get("data", [])
+    return request("GET", "/accounts", params={"from": max(offset, 0), "limit": min(max(limit, 1), 50)}).get("data", [])
+
+
+def find_account_by_name(name: str) -> dict | None:
+    """Resolve an exact account name across Zoho Desk pages without truncating at the first 50."""
+    wanted = " ".join(name.lower().split())
+    for offset in range(0, 100_000, 50):
+        rows = list_accounts(offset=offset, limit=50)
+        match = next((row for row in rows if " ".join(
+            str(row.get("accountName") or row.get("name") or "").lower().split()) == wanted), None)
+        if match or len(rows) < 50:
+            return match
+    return None
 
 
 def create_contact(payload: dict) -> dict:
@@ -244,8 +267,9 @@ def add_comment(ticket_id: str, content: str, *, public: bool = False) -> dict:
                    {"content": content, "isPublic": public})
 
 
-def list_comments(ticket_id: str) -> list[dict]:
-    return request("GET", f"/tickets/{urllib.parse.quote(str(ticket_id), safe='')}/comments").get("data", [])
+def list_comments(ticket_id: str, *, offset: int = 1, limit: int = 25) -> list[dict]:
+    return request("GET", f"/tickets/{urllib.parse.quote(str(ticket_id), safe='')}/comments",
+                   params={"from": max(offset, 1), "limit": min(max(limit, 1), 50)}).get("data", [])
 
 
 def _department_id() -> str:
