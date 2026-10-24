@@ -111,8 +111,8 @@ def create_account(payload: dict) -> dict:
 
 
 def match_contact(name: str, company: str, phone: str) -> dict | None:
-    digits = "".join(c for c in (phone or "") if c.isdigit())[-10:]
-    if not digits or not name.strip() or not company.strip():
+    phone_values = _phone_variants(phone)
+    if not phone_values or not name.strip() or not company.strip():
         return None
     wanted = " ".join(name.lower().split())
     try:
@@ -122,10 +122,61 @@ def match_contact(name: str, company: str, phone: str) -> dict | None:
     for row in rows:
         full = " ".join((row.get("firstName", "") + " " + row.get("lastName", "")).lower().split())
         acct = row.get("account") or {}
-        row_digits = "".join(c for c in (row.get("phone") or "") if c.isdigit())[-10:]
-        if full == wanted and row_digits == digits and (acct.get("accountName", "").strip().lower() == company.strip().lower()):
+        row_values = _record_phone_variants(row)
+        if full == wanted and phone_values & row_values and (acct.get("accountName", "").strip().lower() == company.strip().lower()):
             return row
     return None
+
+
+def _phone_variants(phone: str) -> set[str]:
+    """Compare punctuation-free numbers and the common US +1 / ten-digit forms."""
+    digits = "".join(c for c in (phone or "") if c.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        return {digits, digits[1:]}
+    if len(digits) == 10:
+        return {digits, "1" + digits}
+    return {digits} if len(digits) >= 7 else set()
+
+
+def _record_phone_variants(row: dict) -> set[str]:
+    return _phone_variants(row.get("phone", "")) | _phone_variants(row.get("mobile", ""))
+
+
+def lookup_caller_by_phone(phone: str) -> dict:
+    """Find a unique Zoho contact/account by caller ID. Caller ID is not identity verification."""
+    variants = _phone_variants(phone)
+    if not variants:
+        return {"contact": None, "account": None}
+
+    try:
+        contact_rows = request("GET", "/contacts/search", params={
+            "searchStr": phone, "from": 0, "limit": 50, "include": "accounts",
+        }).get("data", [])
+    except RuntimeError:
+        contact_rows = list_contacts(offset=0, limit=50)
+    contacts = [row for row in contact_rows if variants & _record_phone_variants(row)]
+    unique_contacts = {str(row.get("id")): row for row in contacts if row.get("id")}
+    contact = next(iter(unique_contacts.values())) if len(unique_contacts) == 1 else None
+
+    if contact and contact.get("account"):
+        return {"contact": contact, "account": contact["account"]}
+    if contacts:
+        related = {str((row.get("account") or {}).get("id")): row.get("account")
+                   for row in contacts if (row.get("account") or {}).get("id")}
+        if len(related) == 1:
+            return {"contact": contact, "account": next(iter(related.values()))}
+
+    try:
+        account_rows = request("GET", "/accounts/search", params={
+            "searchStr": phone, "from": 0, "limit": 50,
+        }).get("data", [])
+    except RuntimeError:
+        account_rows = list_accounts(offset=0, limit=50)
+    accounts = [row for row in account_rows if variants & _record_phone_variants(row)]
+    unique_accounts = {str(row.get("id")): row for row in accounts if row.get("id")}
+    account = next(iter(unique_accounts.values())) if len(unique_accounts) == 1 else None
+
+    return {"contact": contact, "account": account}
 
 
 def get_ticket(ticket_id: str) -> dict:

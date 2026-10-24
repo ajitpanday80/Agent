@@ -28,8 +28,9 @@ symbols. Give ONE troubleshooting step at a time, then wait for the caller to tr
 Ask one question at a time.
 
 Call flow:
-1. Say you are an AI assistant. Ask for the caller's name and company, then a callback number.
-2. Call identify_caller. If not recognized, still help, but share no account or ticket details.
+1. Say you are an AI assistant. Use the Zoho caller-ID match in your greeting; ask only for name or company that Zoho did not identify.
+   Use inbound caller ID as the callback number unless the caller provides another number. Do not ask for a number twice.
+2. Call identify_caller with any known and caller-confirmed details. If not contact-matched, share no account or ticket details.
 3. Ask what is wrong. Find out: how many people are affected, whether work is completely stopped,
    whether there is a workaround, and anything that looks like a security problem.
 4. Call check_known_outages for the issue category. If there is a matching active incident, tell the caller
@@ -61,15 +62,17 @@ Hard rules:
 - Before using save_voicemail_message, explain that speech will be transcribed and saved to Zoho Desk and ask for consent.
   If they decline, do not capture the message; create only a callback request with minimal details.
 - Do not discuss other clients. Do not read out phone numbers or emails from records.
+- Caller ID is not identity verification. A phone match may personalize the greeting and associate a ticket, but never disclose ticket/account details or perform access changes based on it.
 - If you are unsure about anything, say so and create a ticket.
 """
 
 
 class MspSupportAgent(Agent):
-    def __init__(self, job_ctx: agents.JobContext | None = None) -> None:
+    def __init__(self, job_ctx: agents.JobContext | None = None, inbound_caller_number: str = "") -> None:
         super().__init__(instructions=INSTRUCTIONS)
         self.caller: dict | None = None
         self.job_ctx = job_ctx
+        self.inbound_caller_number = inbound_caller_number.strip()
         self.pending_voicemail: tuple[str | None, int] | None = None
 
     @staticmethod
@@ -108,8 +111,32 @@ class MspSupportAgent(Agent):
             return False, f"LiveKit transfer failed ({type(error).__name__})."
 
     async def on_enter(self) -> None:
+        if self.inbound_caller_number:
+            def lookup():
+                conn = db.connect()
+                try:
+                    return tickets.identify_caller(conn, "", "", self.inbound_caller_number)
+                finally:
+                    conn.close()
+            try:
+                self.caller = await asyncio.wait_for(asyncio.to_thread(lookup), timeout=3.0)
+            except Exception as error:
+                logger.info("Inbound caller-ID lookup unavailable: %s", type(error).__name__)
+        if self.caller and self.caller.get("recognized"):
+            name, company = self.caller.get("name", ""), self.caller.get("company_name", "")
+            if name and company:
+                greeting = f"Greet them by saying: Hi {name}, thanks for calling {company} support. How can I help you today?"
+            elif name:
+                greeting = f"Greet them by saying: Hi {name}, thanks for calling MSP support. What company are you calling from?"
+            else:
+                greeting = "Say you are the AI service desk assistant and ask for the caller's name."
+        elif self.caller and self.caller.get("company_recognized"):
+            company = self.caller.get("company_name", "")
+            greeting = f"Thank them for calling {company} support and ask only for their name."
+        else:
+            greeting = "Say you are the AI service desk assistant and ask for the caller's name and company."
         await self.session.generate_reply(
-            instructions="Greet the caller, say you are an AI service desk assistant, and ask for their name and company.",
+            instructions="Say you are an AI service desk assistant. " + greeting,
             allow_interruptions=False,  # noise or echo must not cut the greeting off
         )
 
@@ -117,8 +144,15 @@ class MspSupportAgent(Agent):
     async def identify_caller(self, context: RunContext, name: str, company: str, callback_number: str = "") -> str:
         """Look up the caller in client records. Recognized does not mean verified."""
         conn = db.connect()
-        self.caller = await asyncio.to_thread(tickets.identify_caller, conn, name, company, callback_number)
+        callback_number = callback_number.strip() or self.inbound_caller_number
+        try:
+            self.caller = await asyncio.to_thread(tickets.identify_caller, conn, name, company, callback_number)
+        finally:
+            conn.close()
         if not self.caller["recognized"]:
+            if self.caller.get("company_recognized"):
+                return (f"Company matched to Zoho account {self.caller['company_name']}; caller is not contact-matched or identity-verified. "
+                        "Share no ticket or contact details.")
             return ("Caller not found in client records. Continue helping, but do not share any ticket or account "
                     "details. Mark this in the ticket.")
         extra = " Their number does not match the number on file; note this in the ticket." \
@@ -162,6 +196,7 @@ class MspSupportAgent(Agent):
     ) -> str:
         """Create a ticket. scope: single_user, several_users or whole_company. severity: stopped (cannot work),
         degraded (can work with difficulty) or minor. The system sets priority and returns what to tell the caller."""
+        callback_number = callback_number.strip() or self.inbound_caller_number
         conn = db.connect()
         try:
             r = await asyncio.to_thread(
@@ -261,6 +296,7 @@ class MspSupportAgent(Agent):
         """Create a Zoho ticket, then transfer the active call to the configured voicemail destination."""
         if not message_summary.strip():
             return "Ask the caller for a short reason for the call before routing them."
+        callback_number = callback_number.strip() or self.inbound_caller_number
         conn = db.connect()
         summary = f"Caller requested voicemail: {message_summary.strip()}"[:250]
         try:
@@ -323,6 +359,7 @@ class MspSupportAgent(Agent):
         """Save a caller's spoken message as a Zoho ticket and internal handoff when mailbox transfer is unavailable."""
         if not message_summary.strip() or not spoken_message.strip():
             return "Ask the caller to dictate a brief message and summarize the issue before saving it."
+        callback_number = callback_number.strip() or self.inbound_caller_number
         spoken_message = spoken_message.strip()[:5000]
         if self.pending_voicemail:
             ticket_id, handoff_id = self.pending_voicemail
@@ -386,6 +423,7 @@ class MspSupportAgent(Agent):
     ) -> str:
         """Record a call that you fixed with a knowledge-base step AFTER the caller confirmed it worked and needs
         nothing else. Not for security or account-access issues; those always need create_ticket."""
+        callback_number = callback_number.strip() or self.inbound_caller_number
         conn = db.connect()
         try:
             r = await asyncio.to_thread(
@@ -452,8 +490,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     def _error(ev) -> None:
         logger.error("session error: %s", ev.error)
 
-    await session.start(room=ctx.room, agent=MspSupportAgent(ctx))
-    await ctx.connect()
+    # Wait for the caller first so SIP caller ID can be used for a Zoho lookup and tailored greeting.
+    participant = await ctx.wait_for_participant()
+    inbound_number = ""
+    if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        inbound_number = participant.attributes.get("sip.phoneNumber", "")
+    await session.start(room=ctx.room, agent=MspSupportAgent(ctx, inbound_number))
 
 
 if __name__ == "__main__":

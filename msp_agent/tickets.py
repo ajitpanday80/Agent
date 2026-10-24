@@ -29,24 +29,53 @@ def _digits(phone: str) -> str:
 
 
 def identify_caller(conn: sqlite3.Connection, name: str, company: str, callback_number: str = "") -> dict:
-    """Match an exact name, account, and phone against Zoho contacts. This is not identity verification."""
+    """Resolve a Zoho contact/account from inbound caller ID and optional caller-provided details.
+
+    A matching phone number can personalize a greeting and link a ticket, but is never identity verification.
+    """
     from . import zoho
     try:
         row = zoho.match_contact(name, company, callback_number)
     except Exception:
         row = None
+    phone_match = {"contact": None, "account": None}
+    if row is None and callback_number:
+        try:
+            phone_match = zoho.lookup_caller_by_phone(callback_number)
+        except Exception:
+            phone_match = {"contact": None, "account": None}
+    candidate = phone_match.get("contact")
+    account = phone_match.get("account") or {}
+    supplied_name = " ".join((name or "").lower().split())
+    supplied_company = (company or "").strip().lower()
+    candidate_name = " ".join(part for part in (
+        str((candidate or {}).get("firstName") or ""), str((candidate or {}).get("lastName") or "")
+    ) if part).lower()
+    # A caller correction must prevent us from reusing another contact's name from caller ID.
+    if candidate and supplied_name and candidate_name.lower() != supplied_name:
+        candidate = None
+    candidate_company = str(((candidate or {}).get("account") or {}).get("accountName") or "").strip().lower()
+    if candidate and supplied_company and candidate_company and candidate_company != supplied_company:
+        candidate = None
+    if row is None and candidate and (not supplied_name or not supplied_company or candidate_name.lower() == supplied_name):
+        row = candidate
     if row:
         acct = row.get("account") or {}
         flag = conn.execute("SELECT is_vip FROM contact_flags WHERE zoho_contact_id=?",
                             (str(row.get("id", "")),)).fetchone()
-        return {"recognized": True, "contact_id": row.get("id"), "company_id": acct.get("id"),
+        return {"recognized": True, "company_recognized": bool(acct.get("id")),
+                "contact_id": row.get("id"), "company_id": acct.get("id"),
                 "company_name": acct.get("accountName", company),
                 "name": " ".join(p for p in (row.get("firstName"), row.get("lastName")) if p),
                 "is_vip": bool(flag["is_vip"] if flag else row.get("isVIP", row.get("isVip", False))),
                 "phone_matches_record": True,
                 "zoho_contact": row}
-    return {"recognized": False, "contact_id": None, "company_id": None, "company_name": company,
-            "name": name, "is_vip": False, "phone_matches_record": False}
+    if account and supplied_company and str(account.get("accountName") or "").strip().lower() != supplied_company:
+        account = {}
+    company_name = account.get("accountName") or company
+    return {"recognized": False, "company_recognized": bool(account),
+            "contact_id": None, "company_id": account.get("id"), "company_name": company_name,
+            "name": name, "is_vip": False, "phone_matches_record": bool(account)}
 
 
 def active_incidents(conn: sqlite3.Connection, category: str | None = None) -> list[sqlite3.Row]:
@@ -154,6 +183,8 @@ def create(
         payload["contactId"] = str(caller["contact_id"])
         if caller.get("company_id"):
             payload["accountId"] = str(caller["company_id"])
+    elif caller.get("company_id"):
+        payload["accountId"] = str(caller["company_id"])
     response = zoho.create_ticket(payload)
     if not response.get("id"):
         raise RuntimeError(f"Zoho Desk created a ticket without returning its ID: {response}")
@@ -205,6 +236,8 @@ def create_resolved(
         payload["contactId"] = str(caller["contact_id"])
         if caller.get("company_id"):
             payload["accountId"] = str(caller["company_id"])
+    elif caller.get("company_id"):
+        payload["accountId"] = str(caller["company_id"])
     response = zoho.create_ticket(payload)
     if not response.get("id"):
         raise RuntimeError(f"Zoho Desk created a ticket without returning its ID: {response}")
