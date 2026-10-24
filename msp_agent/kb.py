@@ -4,6 +4,7 @@ import re
 import json
 import math
 import sqlite3
+from pathlib import Path
 
 ARTICLES = [
     {
@@ -125,6 +126,48 @@ ARTICLES = [
 STOPWORDS = {"a", "an", "the", "or", "and", "of", "to", "not", "cannot", "can", "will", "is", "my", "our", "we", "in", "on", "it"}
 
 
+def markdown_articles() -> list[dict]:
+    """Load the repository's source articles for the admin review queue; they are always seeded as drafts."""
+    folder = Path(__file__).resolve().parent.parent / "kb"
+    articles = []
+    for path in sorted(folder.glob("*.md")):
+        raw = path.read_text(encoding="utf-8")
+        match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", raw, re.S)
+        if not match:
+            continue
+        meta: dict[str, str] = {}
+        sources: list[str] = []
+        key = ""
+        for line in match.group(1).splitlines():
+            if line.startswith("  - ") and key == "sources":
+                sources.append(line[4:].strip())
+            elif ":" in line and not line.startswith(" "):
+                key, value = line.split(":", 1)
+                key = key.strip()
+                if key == "sources":
+                    continue
+                meta[key] = value.strip()
+        sections: dict[str, str] = {}
+        current = ""
+        for line in match.group(2).splitlines():
+            if line.startswith("## "):
+                current = line[3:].strip().lower()
+                sections[current] = ""
+            elif current:
+                sections[current] += line + "\n"
+        steps = [re.sub(r"^\d+\.\s*", "", line).strip()
+                 for line in sections.get("steps", "").splitlines() if line.strip()]
+        title, category, article_id = meta.get("title"), meta.get("category"), meta.get("id")
+        if not title or not category or not article_id or not steps or not sources:
+            continue
+        escalation_notes = sections.get("escalate if", "").strip()
+        content = " ".join((title, meta.get("keywords", "").replace(",", " "), *steps, escalation_notes))
+        articles.append({"id": article_id, "title": title, "category": category, "content": content,
+                         "steps": steps, "sources": sources, "escalate_if": escalation_notes,
+                         "technician_notes": sections.get("technician notes", "").strip()})
+    return articles
+
+
 def _tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9']+", text.lower()))
 
@@ -163,8 +206,9 @@ def search_index(query: str, conn: sqlite3.Connection, limit: int = 3,
     else:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM kb_articles WHERE enabled=1 AND company_name='' ORDER BY updated_at DESC")]
-    if not rows and company_name != "*":
-        return search(query, limit)
+    # Never fall back to bundled advice: only reviewed, enabled DB articles are production content.
+    if not rows:
+        return []
     corpus = []
     for row in rows:
         try:
@@ -193,6 +237,7 @@ def search_index(query: str, conn: sqlite3.Connection, limit: int = 3,
     scored.sort(key=lambda item: (-item[0], item[1]["title"].lower()))
     return [{"id": row["id"], "title": row["title"], "category": row["category"],
              "company_name": row.get("company_name", ""), "content": row["content"], "steps": steps, "sources": sources,
+             "escalate_if": row.get("escalate_if", ""),
              "score": round(score, 4)} for score, row, steps, sources in scored[:limit]]
 
 
@@ -200,5 +245,7 @@ def format_for_agent(article: dict) -> str:
     steps = " ".join(f"Step {i}: {s}" for i, s in enumerate(article["steps"], 1))
     if article.get("content"):
         scope = f"For {article['company_name']}. " if article.get("company_name") else ""
-        return f"{scope}{article['title']}. {steps or article['content']} Sources: {', '.join(article.get('sources', []))}"
+        escalation = article.get("escalate_if", "")
+        extra = f" Escalate if: {escalation}." if escalation else ""
+        return f"{scope}{article['title']}. {steps or article['content']}.{extra} Sources: {', '.join(article.get('sources', []))}"
     return f"{article['title']}. {steps} Escalate if: {article['escalate_if']}"

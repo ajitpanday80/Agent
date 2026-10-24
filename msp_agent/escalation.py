@@ -43,10 +43,6 @@ MATRIX = {
     (3, 1): 3, (3, 2): 4, (3, 3): 4,
 }
 
-# Outages in these categories rarely stop a business outright (there is usually a workaround such as another
-# printer or a restart), so a whole-office printer problem is not P1. Edit to match your clients' reality.
-NON_CRITICAL_CATEGORIES = ("printing", "performance")
-
 SCOPES = ("single_user", "several_users", "whole_company")
 SEVERITIES = ("stopped", "degraded", "minor")
 CATEGORIES = ("email", "printing", "network_vpn", "performance", "access", "security", "software", "hardware", "other")
@@ -109,24 +105,24 @@ class Decision:
     caller_instructions: str = ""
 
     def say_to_caller(self) -> str:
-        eta = _fmt_minutes(self.ack_minutes)
         if self.action == "transfer_to_human":
-            return f"Tell the caller you have sent the request to the technician handoff queue, target response within {eta}."
+            return "Tell the caller the ticket is in the staff follow-up queue. A live transfer is not available on this line."
         if self.action == "page_oncall":
-            return f"Tell the caller the request is marked urgent in the technician queue, with a target callback within {eta}."
+            return "Tell the caller the ticket is marked urgent for staff follow-up. Do not promise a callback time."
         if self.action == "voicemail":
-            return "Tell the caller you recorded the request for the helpdesk team to review."
+            return "Tell the caller the request is in the helpdesk intake queue. No voicemail recording was made."
         if self.action == "ticket_callback_verify":
-            return ("Tell the caller a technician will call back to verify their identity before changing anything "
-                    f"on their account, target within {eta}.")
+            return "Tell the caller staff follow-up is required to verify their identity before any account change. Do not promise a callback time."
         if self.action == "callback_next_business_day":
-            return "Tell the caller the office is closed and a technician will call back next business day."
-        return f"Tell the caller the team will follow up, target first response within {eta}."
+            return "Tell the caller the ticket is in the staff follow-up queue. Do not promise a callback time."
+        return "Tell the caller the ticket is recorded in Zoho Desk for staff follow-up."
 
 
 def in_business_hours(now: datetime | None = None) -> bool:
-    tz = ZoneInfo(_runtime_setting("timezone", "MSP_TZ", "UTC"))
+    tz = ZoneInfo(_runtime_setting("timezone", "MSP_TZ", "Australia/Sydney"))
     now = (now or datetime.now(tz)).astimezone(tz)
+    if _runtime_setting("coverage_mode", "MSP_COVERAGE_MODE", "weekdays") == "24x7":
+        return True
     start, end = _runtime_setting("hours", "MSP_HOURS", "08:00-18:00").split("-")
     if now.weekday() >= 5:
         return False
@@ -165,10 +161,6 @@ def decide(
     if severity == "stopped" and workaround_available:
         urgency = 2
         reasons.append("work stopped but a workaround exists")
-    if category in NON_CRITICAL_CATEGORIES and not security_concern:
-        if impact < 2 or urgency < 2:
-            reasons.append(f"{category} is a non-critical category: impact and urgency capped at 2")
-        impact, urgency = max(impact, 2), max(urgency, 2)
     priority = MATRIX[(impact, urgency)]
     reasons.append(f"impact {impact} x urgency {urgency} = P{priority}")
 

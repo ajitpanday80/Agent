@@ -7,6 +7,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from flask import Flask, g, jsonify, redirect, render_template_string, request, session, url_for
@@ -40,8 +41,9 @@ def _conn():
     if "db" not in g:
         g.db = db.connect()
         settings = {r["key"]: r["value"] for r in g.db.execute("SELECT key,value FROM app_settings")}
-        os.environ["MSP_TZ"] = settings.get("timezone", os.getenv("MSP_TZ", "UTC"))
+        os.environ["MSP_TZ"] = settings.get("timezone", os.getenv("MSP_TZ", "Australia/Sydney"))
         os.environ["MSP_HOURS"] = settings.get("hours", os.getenv("MSP_HOURS", "08:00-18:00"))
+        os.environ["MSP_COVERAGE_MODE"] = settings.get("coverage_mode", os.getenv("MSP_COVERAGE_MODE", "24x7"))
         os.environ["MSP_AFTER_HOURS_MODE"] = settings.get("after_hours_mode", "on_call")
     return g.db
 
@@ -131,13 +133,13 @@ async function newTicket(){let root=document.querySelector('#content');root.inne
 async function handoffPage(root){let d=await api('handoffs');root.innerHTML=`<div class=top><div><h1>Voicemail & handoffs</h1><span class=muted>Internal queue until a phone provider adapter is connected.</span></div><button class=primary onclick="intakeForm()">Log voicemail / callback</button></div><div class=panel scroll><table><thead><tr><th>Received</th><th>Type</th><th>State</th><th>Ticket</th><th>Callback</th><th>Summary / message</th><th>Action</th></tr></thead><tbody>${d.items.map(h=>`<tr><td>${esc(h.created_at)}</td><td>${esc(h.kind)}</td><td>${esc(h.status)}</td><td>${h.ticket_id?`#${esc(h.ticket_ref||h.ticket_id)}`:'—'}</td><td>${esc(h.callback_number)}</td><td>${esc(h.summary)}<details><summary>Message</summary><div class=detail>${esc(h.transcript)}</div></details></td><td><button onclick="handoffState(${h.id},'in_progress')">Start</button> <button onclick="handoffState(${h.id},'completed')">Complete</button></td></tr>`).join('')}</tbody></table></div>`}
 function intakeForm(){let r=document.querySelector('#content');r.insertAdjacentHTML('afterbegin',`<form id=intake class=panel><h2>Voicemail / callback intake</h2><div class=formrow><label class=field>Caller name<input name=name required></label><label class=field>Company<input name=company required></label><label class=field>Callback number<input name=phone></label><label class=field>Type<select name=kind><option value=voicemail>Voicemail</option><option value=callback>Callback request</option><option value=human_request>Human agent request</option></select></label></div><label class=field>Summary<input name=summary required></label><label class=field>Transcript or message<textarea name=transcript></textarea></label><button class=primary>Save and create Zoho ticket</button> <button type=button onclick="this.form.remove()">Cancel</button></form>`);r.querySelector('#intake').onsubmit=async e=>{e.preventDefault();let d=await api('handoffs',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast(d.ticket_created?'Zoho ticket and handoff created':'Saved to intake; Zoho ticket not created');render()}}
 async function handoffState(id,status){await api('handoffs/'+id,{method:'PATCH',body:JSON.stringify({status})});toast('Handoff updated');render()}
-async function kbPage(root){let d=await api('knowledge'),a=d.articles;root.innerHTML=`<div class=top><div><h1>Knowledge base</h1><span class=muted>Curated articles retrieved locally and supplied to the voice agent as grounded steps.</span></div><div class=actions><button onclick="importKb()">Import runbook text</button><button class=primary onclick="kbEditor()">New article</button></div></div><div class=panel><div class=actions><input id=kbquery placeholder='Search troubleshooting library' style='flex:1'><button onclick="kbSearch()">Search</button><button onclick="kbSearch(true)">Preview matches</button></div><div id=kbresults></div></div><div class=panel style="margin-top:14px"><table><thead><tr><th>Article</th><th>Category</th><th>Client</th><th>State</th><th>Sources</th><th></th></tr></thead><tbody>${a.map(x=>`<tr><td>${esc(x.title)}</td><td>${esc(x.category)}</td><td>${esc(x.company_name||'All clients')}</td><td>${x.enabled?'Enabled':'Disabled'}</td><td>${x.sources.length}</td><td><button onclick="kbEditor('${esc(x.id)}')">Edit</button></td></tr>`).join('')}</tbody></table></div>`}
+async function kbPage(root){let d=await api('knowledge'),a=d.articles;root.innerHTML=`<div class=top><div><h1>Knowledge base</h1><span class=muted>Articles are drafts until an admin reviews them. Only enabled, sourced articles reach the voice agent.</span></div><div class=actions><button onclick="importKb()">Import runbook text</button><button class=primary onclick="kbEditor()">New article</button></div></div><div class=panel><div class=actions><input id=kbquery placeholder='Search troubleshooting library' style='flex:1'><button onclick="kbSearch()">Search</button><button onclick="kbSearch(true)">Preview matches</button></div><div id=kbresults></div></div><div class=panel style="margin-top:14px"><table><thead><tr><th>Article</th><th>Category</th><th>Client</th><th>Review</th><th>Sources</th><th></th></tr></thead><tbody>${a.map(x=>`<tr><td>${esc(x.title)}</td><td>${esc(x.category)}</td><td>${esc(x.company_name||'All clients')}</td><td>${x.enabled?'Approved / enabled':esc(x.review_status||'draft')}</td><td>${x.sources.length}</td><td><button onclick="kbEditor('${esc(x.id)}')">Edit / review</button></td></tr>`).join('')}</tbody></table></div>`}
 function importKb(){let root=document.querySelector('#content');root.insertAdjacentHTML('afterbegin',`<form id=importkb class=panel><h2>Import runbook text</h2><label class=field>Title<input name=title required></label><label class=field>Category<select name=category>${cats.map(c=>`<option>${esc(c)}</option>`).join('')}</select></label><label class=field>Client scope (blank means shared)<input name=company_name></label><label class=field>Source URLs (one per line)<textarea name=sources></textarea></label><label class=field>Paste text<textarea name=content required style="min-height:220px"></textarea></label><button class=primary>Import and split into searchable chunks</button> <button type=button onclick="this.form.remove()">Cancel</button></form>`);root.querySelector('#importkb').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));o.sources=o.sources.split('\n').filter(Boolean);let d=await api('knowledge/import',{method:'POST',body:JSON.stringify(o)});toast(`Imported ${d.chunks} chunks`);render()}}
 async function kbSearch(preview=false){let q=encodeURIComponent(document.querySelector('#kbquery').value),d=await api('knowledge/search?q='+q),el=document.querySelector('#kbresults');el.innerHTML=d.results.map(x=>`<div class=result><b>${esc(x.title)}</b> <span class=pill>${esc(x.category)}</span><p>${esc(x.content)}</p>${(x.steps||[]).map((s,i)=>`<p>${i+1}. ${esc(s)}</p>`).join('')}<small class=muted>Relevance ${x.score}; sources: ${esc(x.sources.join(', '))}</small></div>`).join('')||'<p class=muted>No relevant article found.</p>'}
-async function kbEditor(id){let root=document.querySelector('#content'),a=id?await api('knowledge/'+encodeURIComponent(id)):null;root.insertAdjacentHTML('afterbegin',`<form id=kbform class=panel><h2>${a?'Edit article':'New KB article'}</h2><input type=hidden name=id value="${esc(a?.id||'')}"><div class=formrow><label class=field>Title<input name=title required value="${esc(a?.title||'')}"></label><label class=field>Category<select name=category>${cats.map(c=>`<option ${a?.category===c?'selected':''}>${esc(c)}</option>`).join('')}</select></label></div><label class=field>Client scope (blank means shared) <input name=company_name value="${esc(a?.company_name||'')}"></label><label class=field>Search content / symptom description<textarea name=content required>${esc(a?.content||'')}</textarea></label><label class=field>Step-by-step safe instructions (one per line)<textarea name=steps>${esc((a?.steps||[]).join('\n'))}</textarea></label><label class=field>Source URLs (one per line)<textarea name=sources>${esc((a?.sources||[]).join('\n'))}</textarea></label><label><input style="width:auto" type=checkbox name=enabled ${!a||a.enabled?'checked':''}> Enabled</label><p><button class=primary>Save article</button> <button type=button onclick="this.form.remove()">Cancel</button></p></form>`);root.querySelector('#kbform').onsubmit=async e=>{e.preventDefault();let f=e.target,o=Object.fromEntries(new FormData(f));o.steps=o.steps.split('\n').filter(Boolean);o.sources=o.sources.split('\n').filter(Boolean);o.enabled=f.enabled.checked;await api('knowledge',{method:'POST',body:JSON.stringify(o)});toast('Knowledge article saved');render()}}
+async function kbEditor(id){let root=document.querySelector('#content'),a=id?await api('knowledge/'+encodeURIComponent(id)):null;root.insertAdjacentHTML('afterbegin',`<form id=kbform class=panel><h2>${a?'Edit article':'New KB article'}</h2><p class=muted>Enabling an article records your admin account as reviewer. Add authoritative source URLs and confirm the client scope and safe steps before enabling.</p><input type=hidden name=id value="${esc(a?.id||'')}"><div class=formrow><label class=field>Title<input name=title required value="${esc(a?.title||'')}"></label><label class=field>Category<select name=category>${cats.map(c=>`<option ${a?.category===c?'selected':''}>${esc(c)}</option>`).join('')}</select></label></div><label class=field>Client scope (blank means shared) <input name=company_name value="${esc(a?.company_name||'')}"></label><label class=field>Search content / symptom description<textarea name=content required>${esc(a?.content||'')}</textarea></label><label class=field>Step-by-step safe instructions (one per line)<textarea name=steps>${esc((a?.steps||[]).join('\n'))}</textarea></label><label class=field>Source URLs (one per line)<textarea name=sources>${esc((a?.sources||[]).join('\n'))}</textarea></label><label><input style="width:auto" type=checkbox name=enabled ${a?.enabled?'checked':''}> Approve and enable for agent</label><p><button class=primary>Save article</button> <button type=button onclick="this.form.remove()">Cancel</button></p></form>`);root.querySelector('#kbform').onsubmit=async e=>{e.preventDefault();let f=e.target,o=Object.fromEntries(new FormData(f));o.steps=o.steps.split('\n').filter(Boolean);o.sources=o.sources.split('\n').filter(Boolean);o.enabled=f.enabled.checked;await api('knowledge',{method:'POST',body:JSON.stringify(o)});toast('Knowledge article saved');render()}}
 async function incidentPage(root){let d=await api('incidents');root.innerHTML=`<div class=top><div><h1>Known incidents</h1><span class=muted>Local operational notices surfaced to the voice agent.</span></div><button class=primary onclick="incidentForm()">Add incident</button></div><div class=panel><table><thead><tr><th>Incident</th><th>Category</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>${d.items.map(i=>`<tr><td>${esc(i.title)}</td><td>${esc(i.category)}</td><td>${esc(i.status)}</td><td>${esc(i.created_at)}</td><td>${i.status==='active'?`<button onclick="resolveIncident(${i.id})">Resolve</button>`:''}</td></tr>`).join('')}</tbody></table></div>`}
 function incidentForm(){let t=prompt('Incident title');if(!t)return;let c=prompt('Category: '+cats.join(', '),'network_vpn');api('incidents',{method:'POST',body:JSON.stringify({title:t,category:c})}).then(()=>{toast('Incident added');render()}).catch(e=>toast(e.message))}async function resolveIncident(id){await api('incidents/'+id,{method:'PATCH',body:JSON.stringify({status:'resolved'})});render()}
-async function settingsPage(root){let d=await api('settings');let slas=[1,2,3,4].map(p=>`<div class=formrow><label class=field>P${p} first response (minutes)<input type=number min=1 name=p${p}_ack value="${esc(d.settings['p'+p+'_ack'])}"></label><label class=field>P${p} target resolution (hours)<input type=number min=1 name=p${p}_resolve value="${esc(d.settings['p'+p+'_resolve'])}"></label></div>`).join('');root.innerHTML=`<div class=top><div><h1>Routing & system</h1><span class=muted>Escalation, contract targets, and connectivity</span></div></div><div class=grid><form id=settings class=panel><h2>Call escalation policy</h2><label class=field>Time zone<input name=timezone value="${esc(d.settings.timezone||'UTC')}"></label><label class=field>Business hours (24h, Mon–Fri)<input name=hours value="${esc(d.settings.hours||'08:00-18:00')}"></label><label class=field>After-hours priority 1/2 route<select name=after_hours_mode><option value=on_call>Urgent technician queue</option><option value=voicemail>Helpdesk intake queue</option></select></label><h2>SLA targets</h2><p class=muted>These are response and resolution targets. Set them to your MSP contracts.</p>${slas}<p><button class=primary>Save routing settings</button></p></form><div class=panel><h2>Zoho Desk connection</h2><p>${d.zoho.configured?'Configured':'Not configured'}</p><p class=muted>${esc(d.zoho.message||'')}</p><p>Tickets are read and written directly in Zoho Desk.</p><h2>Phone provider</h2><p>Not connected. Handoffs and voicemail messages can be entered here; automatic call forwarding requires a provider adapter.</p></div></div>`;root.querySelector('[name=after_hours_mode]').value=d.settings.after_hours_mode||'on_call';root.querySelector('#settings').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));await api('settings',{method:'POST',body:JSON.stringify(o)});toast('Routing settings saved')}}
+async function settingsPage(root){let d=await api('settings');let slas=[1,2,3,4].map(p=>`<div class=formrow><label class=field>P${p} first response (minutes)<input type=number min=1 name=p${p}_ack value="${esc(d.settings['p'+p+'_ack'])}"></label><label class=field>P${p} target resolution (hours)<input type=number min=1 name=p${p}_resolve value="${esc(d.settings['p'+p+'_resolve'])}"></label></div>`).join('');root.innerHTML=`<div class=top><div><h1>Routing & system</h1><span class=muted>Escalation, contract targets, and connectivity</span></div></div><div class=grid><form id=settings class=panel><h2>Call escalation policy</h2><label class=field>Time zone<input name=timezone value="${esc(d.settings.timezone||'Australia/Sydney')}"></label><label class=field>Coverage<select name=coverage_mode><option value=weekdays>Weekdays during configured hours</option><option value=24x7>24/7 including weekends</option></select></label><label class=field>Weekday hours (24h, local time)<input name=hours value="${esc(d.settings.hours||'00:00-24:00')}"></label><label class=field>Priority 1/2 follow-up classification<select name=after_hours_mode><option value=on_call>Urgent staff queue</option><option value=voicemail>Helpdesk intake queue (no voicemail recording)</option></select></label><h2>SLA targets</h2><p class=muted>Enter targets from your MSP contracts. These are decision support only; configure SLA policies in Zoho Desk for enforcement and notifications. The app cannot confirm staff response or resolution.</p>${slas}<p><button class=primary>Save routing settings</button></p></form><div class=panel><h2>Zoho Desk connection</h2><p>${d.zoho.configured?'Configured':'Not configured'}</p><p class=muted>${esc(d.zoho.message||'')}</p><p>Tickets are read and written directly in Zoho Desk.</p><h2>LiveKit phone line</h2><p>Inbound calls route to this agent by your LiveKit dispatch rule. Human transfer, paging, and recorded voicemail are not enabled. Tickets requiring urgent response appear in the staff handoff queue; staff must monitor it.</p></div></div>`;root.querySelector('[name=coverage_mode]').value=d.settings.coverage_mode||'24x7';root.querySelector('[name=after_hours_mode]').value=d.settings.after_hours_mode||'on_call';root.querySelector('#settings').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));await api('settings',{method:'POST',body:JSON.stringify(o)});toast('Routing settings saved')}}
 async function auditPage(root){let d=await api('audit');root.innerHTML=`<div class=top><div><h1>Audit log</h1><span class=muted>Recent admin changes made in this console.</span></div></div><div class=panel scroll><table><thead><tr><th>Time UTC</th><th>Actor</th><th>Action</th><th>Object</th><th>Details</th></tr></thead><tbody>${d.items.map(x=>`<tr><td>${esc(x.created_at)}</td><td>${esc(x.actor)}</td><td>${esc(x.action)}</td><td>${esc(x.entity_type)} ${esc(x.entity_id)}</td><td>${esc(x.details)}</td></tr>`).join('')}</tbody></table></div>`}
 render();
 </script></body></html>"""
@@ -297,7 +299,8 @@ def _article(row):
     return {"id": row["id"], "title": row["title"], "category": row["category"],
             "company_name": row["company_name"],
             "content": row["content"], "steps": json.loads(row["steps"]),
-            "sources": json.loads(row["sources"]), "enabled": bool(row["enabled"])}
+            "sources": json.loads(row["sources"]), "enabled": bool(row["enabled"]),
+            "review_status": row["review_status"], "reviewed_by": row["reviewed_by"]}
 
 
 @app.get("/api/knowledge/<article_id>")
@@ -316,8 +319,15 @@ def api_knowledge_save():
     title, category = str(data.get("title", "")).strip(), data.get("category", "other")
     company_name = str(data.get("company_name", "")).strip()
     content = str(data.get("content", "")).strip()
+    steps = [str(step).strip() for step in data.get("steps", []) if str(step).strip()]
+    sources = [str(source).strip() for source in data.get("sources", []) if str(source).strip()]
+    enabled = bool(data.get("enabled", False))
     if not title or not content or category not in escalation.CATEGORIES:
         return jsonify(error="Title, content, and a valid category are required"), 400
+    if any(urlparse(source).scheme not in ("http", "https") or not urlparse(source).netloc for source in sources):
+        return jsonify(error="Sources must be complete http or https URLs"), 400
+    if enabled and (not sources or not steps):
+        return jsonify(error="To approve an article, add at least one source URL and one safe step"), 400
     if company_name and not any(str(a.get("accountName", "")).lower() == company_name.lower()
                                 for a in zoho.list_accounts()):
         return jsonify(error="Client scope must exactly match a Zoho Desk account"), 400
@@ -326,12 +336,14 @@ def api_knowledge_save():
         article_id = secrets.token_hex(8)
     old = _conn().execute("SELECT created_at FROM kb_articles WHERE id=?", (article_id,)).fetchone()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _conn().execute("INSERT INTO kb_articles(id,title,category,company_name,content,steps,sources,enabled,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,category=excluded.category,"
+    _conn().execute("INSERT INTO kb_articles(id,title,category,company_name,content,steps,sources,enabled,review_status,reviewed_by,reviewed_at,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,category=excluded.category,"
                     "company_name=excluded.company_name,"
-                    "content=excluded.content,steps=excluded.steps,sources=excluded.sources,enabled=excluded.enabled,updated_at=excluded.updated_at",
-                    (article_id, title, category, company_name, content, json.dumps(data.get("steps", [])),
-                     json.dumps(data.get("sources", [])), int(bool(data.get("enabled", True))),
+                    "content=excluded.content,steps=excluded.steps,sources=excluded.sources,enabled=excluded.enabled,"
+                    "review_status=excluded.review_status,reviewed_by=excluded.reviewed_by,reviewed_at=excluded.reviewed_at,updated_at=excluded.updated_at",
+                    (article_id, title, category, company_name, content, json.dumps(steps),
+                     json.dumps(sources), int(enabled), "approved" if enabled else "draft",
+                     session.get("user", "admin") if enabled else "", now if enabled else None,
                      old["created_at"] if old else now, now))
     _conn().commit()
     _audit("knowledge_saved", "kb_article", article_id, title)
@@ -374,9 +386,9 @@ def api_knowledge_import():
     ids = []
     for i, chunk in enumerate(chunks, 1):
         aid = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:70] + f"-{i}"
-        _conn().execute("INSERT OR REPLACE INTO kb_articles(id,title,category,company_name,content,steps,sources,enabled,created_at,updated_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?)", (aid, f"{title} (part {i})", category, company_name, chunk,
-                        "[]", json.dumps(data.get("sources", [])), 1, now, now))
+        _conn().execute("INSERT OR REPLACE INTO kb_articles(id,title,category,company_name,content,steps,sources,enabled,review_status,reviewed_by,reviewed_at,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (aid, f"{title} (part {i})", category, company_name, chunk,
+                        "[]", json.dumps(data.get("sources", [])), 0, "draft", "", None, now, now))
         ids.append(aid)
     _conn().commit()
     _audit("knowledge_imported", "kb_article", ",".join(ids), f"{len(chunks)} text chunks")
@@ -465,7 +477,7 @@ def api_incident_resolve(incident_id):
     return jsonify(ok=True)
 
 
-DEFAULT_SETTINGS = {"timezone": "UTC", "hours": "08:00-18:00", "after_hours_mode": "on_call",
+DEFAULT_SETTINGS = {"timezone": "Australia/Sydney", "coverage_mode": "24x7", "hours": "00:00-24:00", "after_hours_mode": "on_call",
                     "p1_ack": "10", "p1_resolve": "4", "p2_ack": "15", "p2_resolve": "8",
                     "p3_ack": "60", "p3_resolve": "48", "p4_ack": "240", "p4_resolve": "120"}
 
@@ -488,7 +500,9 @@ def api_settings():
 @_login_required
 def api_settings_save():
     data = request.get_json(force=True)
-    values = {"timezone": str(data.get("timezone", "UTC")), "hours": str(data.get("hours", "08:00-18:00")),
+    values = {"timezone": str(data.get("timezone", "Australia/Sydney")),
+              "coverage_mode": str(data.get("coverage_mode", "24x7")),
+              "hours": str(data.get("hours", "00:00-24:00")),
               "after_hours_mode": data.get("after_hours_mode", "on_call")}
     try:
         for priority in range(1, 5):
@@ -505,8 +519,9 @@ def api_settings_save():
         ZoneInfo(values["timezone"])
     except (ZoneInfoNotFoundError, ValueError):
         return jsonify(error="Enter a valid IANA time zone, such as America/New_York"), 400
-    hour_match = re.fullmatch(r"((?:[01][0-9]|2[0-3]):[0-5][0-9])-((?:[01][0-9]|2[0-3]):[0-5][0-9])", values["hours"])
+    hour_match = re.fullmatch(r"((?:[01][0-9]|2[0-3]):[0-5][0-9])-((?:(?:[01][0-9]|2[0-3]):[0-5][0-9])|24:00)", values["hours"])
     if (not hour_match or hour_match.group(1) >= hour_match.group(2)
+            or values["coverage_mode"] not in ("weekdays", "24x7")
             or values["after_hours_mode"] not in ("on_call", "voicemail")):
         return jsonify(error="Invalid business hours or after-hours route"), 400
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -514,6 +529,7 @@ def api_settings_save():
         _conn().execute("INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (key, val, now))
     _conn().commit()
     os.environ["MSP_TZ"] = values["timezone"]
+    os.environ["MSP_COVERAGE_MODE"] = values["coverage_mode"]
     os.environ["MSP_HOURS"] = values["hours"]
     os.environ["MSP_AFTER_HOURS_MODE"] = values["after_hours_mode"]
     _audit("routing_settings_updated", "settings", "routing", json.dumps(values))

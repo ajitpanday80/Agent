@@ -13,7 +13,10 @@ CREATE TABLE IF NOT EXISTS incidents (
 CREATE TABLE IF NOT EXISTS kb_articles (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, category TEXT NOT NULL, company_name TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL, steps TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]',
-    enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    escalate_if TEXT NOT NULL DEFAULT '', technician_notes TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 0, review_status TEXT NOT NULL DEFAULT 'draft',
+    reviewed_by TEXT NOT NULL DEFAULT '', reviewed_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS handoffs (
     id INTEGER PRIMARY KEY, ticket_id TEXT, kind TEXT NOT NULL,
@@ -53,29 +56,41 @@ def connect(path: str | os.PathLike | None = None) -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns for newer local KB metadata without touching legacy ticket tables."""
+    """Add operational KB metadata without touching legacy ticket tables."""
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(kb_articles)")}
-    if "company_name" not in columns:
-        conn.execute("ALTER TABLE kb_articles ADD COLUMN company_name TEXT NOT NULL DEFAULT ''")
+    additions = {
+        "company_name": "TEXT NOT NULL DEFAULT ''",
+        "escalate_if": "TEXT NOT NULL DEFAULT ''",
+        "technician_notes": "TEXT NOT NULL DEFAULT ''",
+        "review_status": "TEXT NOT NULL DEFAULT 'draft'",
+        "reviewed_by": "TEXT NOT NULL DEFAULT ''",
+        "reviewed_at": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE kb_articles ADD COLUMN {name} {definition}")
+    # Existing advice predates the human review workflow. Disable it until an admin reviews its sources and client fit.
+    conn.execute("UPDATE kb_articles SET enabled=0 WHERE review_status='draft'")
     conn.commit()
 
 
 def _seed_knowledge(conn: sqlite3.Connection) -> None:
-    if conn.execute("SELECT 1 FROM kb_articles LIMIT 1").fetchone():
-        return
     import json
     from .kb import ARTICLES
+    from .kb import markdown_articles
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    for article in ARTICLES:
+    for article in [*ARTICLES, *markdown_articles()]:
         content = article.get("content") or " ".join(
             [article["title"], " ".join(article.get("keywords", [])),
              " ".join(article.get("steps", [])), article.get("escalate_if", "")]
         )
         conn.execute(
-            "INSERT OR IGNORE INTO kb_articles(id,title,category,company_name,content,steps,sources,created_at,updated_at) "
-            "VALUES (?,?,?,'',?,?,?,?,?)",
+            "INSERT OR IGNORE INTO kb_articles(id,title,category,company_name,content,steps,sources,escalate_if,"
+            "technician_notes,enabled,review_status,reviewed_by,reviewed_at,created_at,updated_at) "
+            "VALUES(?,?,?,'',?,?,?,?,?,0,'draft','',NULL,?,?)",
             (article["id"], article["title"], article["category"], content,
-             json.dumps(article.get("steps", [])), json.dumps(article.get("sources", [])), now, now),
+             json.dumps(article.get("steps", [])), json.dumps(article.get("sources", [])),
+             article.get("escalate_if", ""), article.get("technician_notes", ""), now, now),
         )
     conn.commit()
